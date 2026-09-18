@@ -1,0 +1,13 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><div><h1>Caja diaria</h1><p class="muted">La caja se genera automáticamente todos los días y se reinicia a las 00:00.</p></div><span class="badge">Solo administrador</span></div>
+<div class="card"><h2>Configuración actual</h2><p>Fondo fijo con el que debe comenzar cada día: <strong>$ {{fixed|ars}}</strong></p><p class="muted">Podés cambiarlo desde <a href="/settings">Configuración</a>. El cambio se aplica al comenzar el próximo día.</p></div>
+<div class="grid stats">
+<div class="card stat"><span>Fondo inicial de hoy</span><strong>$ {{current.opening_amount|ars}}</strong></div>
+<div class="card stat"><span>Ventas en efectivo</span><strong>$ {{summary.sales_cash|ars}}</strong></div>
+<div class="card stat"><span>Pagos de fiados</span><strong>$ {{summary.debt_payments|ars}}</strong></div>
+<div class="card stat"><span>Dinero esperado en caja</span><strong>$ {{expected|ars}}</strong></div>
+</div>
+<div class="card"><h2>Movimiento manual</h2><form method="post" action="/cash/movement" class="formgrid"><select name="type"><option value="in">Entrada</option><option value="out">Salida</option></select><input name="amount" type="number" step="0.01" min="0.01" placeholder="Importe" required><input name="note" placeholder="Motivo" required><button>Registrar</button></form></div>
+<div class="card"><h2>Movimientos de hoy</h2><div class="tablewrap"><table><tr><th>Fecha</th><th>Usuario</th><th>Tipo</th><th>Importe</th><th>Nota</th></tr>{% for m in moves %}<tr><td>{{m.created_at}}</td><td>{{m.username}}</td><td>{{m.type}}</td><td>$ {{m.amount|ars}}</td><td>{{m.note}}</td></tr>{% else %}<tr><td colspan="5">Todavía no hay movimientos de caja.</td></tr>{% endfor %}</table></div></div>
+<div class="card"><h2>Historial diario</h2><div class="tablewrap"><table><tr><th>Día</th><th>Fondo inicial</th><th>Cierre automático</th><th>Estado</th></tr>{% for h in history %}<tr><td>{{h.opened_at[:10]}}</td><td>$ {{h.opening_amount|ars}}</td><td>{{h.closed_at or 'En curso'}}</td><td>{{'Cerrado automáticamente' if h.status=='closed' else 'Día actual'}}</td></tr>{% endfor %}</table></div></div>
+{% endblock %}

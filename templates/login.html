@@ -1,0 +1,3 @@
+{% extends "base.html" %}{% block content %}
+<div class="login card"><img class="login-logo" src="{{ url_for('static', filename='logo.png') }}" alt="DonArturo Forrajería"><h1>Mi Negocio</h1><p class="muted">Ventas · Stock · Fiados · Caja</p>
+<form method="post"><label>Usuario<input name="username" autocomplete="username" required></label><label>Contraseña<input type="password" name="password" autocomplete="current-password" required></label><label class="check"><input type="checkbox" name="remember" value="1"> Mantener sesión abierta</label><button class="big">Ingresar</button></form></div>{% endblock %}

@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><div><h1>Mi usuario</h1><p class="muted">Datos del administrador</p></div></div>
+<div class="card narrow">
+<form method="post">
+<label>Nombre de usuario<input name="username" value="{{user.username}}" required autocomplete="username"></label>
+<label>Contraseña actual<input type="password" name="current_password" required autocomplete="current-password"></label>
+<p class="muted">Para guardar cambios tenés que confirmar tu contraseña actual.</p>
+<label>Nueva contraseña <span class="muted">(opcional)</span><input type="password" name="new_password" minlength="6" autocomplete="new-password" placeholder="Dejar vacío para no cambiarla"></label>
+<button>Guardar cambios</button>
+</form>
+</div>
+{% endblock %}

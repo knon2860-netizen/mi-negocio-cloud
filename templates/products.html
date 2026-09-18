@@ -1,0 +1,19 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><h1>Productos / Stock</h1><span class="badge">Solo administrador</span></div>
+<div class="card"><h2>Nuevo producto</h2><form method="post" class="formgrid">
+<input name="barcode" placeholder="Código de barras"><input name="name" placeholder="Nombre" required><input name="category" placeholder="Categoría">
+<input name="buy_price" type="number" step="0.01" min="0" placeholder="Costo"><input name="sell_price" type="number" step="0.01" min="0" placeholder="Precio venta" required>
+<input name="stock" type="number" step="0.001" min="0" placeholder="Stock inicial"><input name="min_stock" type="number" step="0.001" min="0" placeholder="Stock mínimo">
+<label class="checkline"><input name="fractional" type="checkbox" value="1"> Se vende fraccionado <small>Permite vender, por ejemplo, 700 g de un producto cuyo stock está cargado en kg.</small></label>
+<button>Agregar producto</button></form></div>
+<div class="card"><div class="toolbar"><input id="filter" placeholder="Buscar producto..." oninput="filterTable()"><span>{{products|length}} productos</span></div>
+<div class="tablewrap"><table id="ptable"><tr><th>Producto</th><th>Código</th><th>Categoría</th><th>Stock</th><th>Venta</th><th>Precio</th><th></th></tr>
+{% for p in products %}<tr><td><b>{{p.name}}</b></td><td>{{p.barcode or '-'}}</td><td>{{p.category or '-'}}</td><td class="{{'danger' if p.stock<0 else ('low' if p.stock<=p.min_stock else '')}}">{{p.stock}}{% if p.fractional %} kg{% endif %}</td><td>{% if p.fractional %}<span class="badge">Fraccionado</span>{% else %}Entero{% endif %}</td><td>$ {{p.sell_price|ars}}{% if p.fractional %} / kg{% endif %}</td><td><details><summary>Editar</summary><form method="post" action="/products/{{p.id}}/edit" class="formgrid compact">
+<input name="barcode" value="{{p.barcode or ''}}"><input name="name" value="{{p.name}}" required><input name="category" value="{{p.category or ''}}">
+<input name="buy_price" value="{{p.buy_price}}" type="number" step="0.01" min="0"><input name="sell_price" value="{{p.sell_price}}" type="number" step="0.01" min="0" required>
+<input name="min_stock" value="{{p.min_stock}}" type="number" step="0.001" min="0">
+<label class="checkline"><input name="fractional" type="checkbox" value="1" {% if p.fractional %}checked{% endif %}> Se vende fraccionado <small>Stock en kg; en ventas se puede ingresar kg o gramos.</small></label><button>Guardar</button></form>
+<form method="post" action="/products/{{p.id}}/delete" onsubmit="return confirm('¿Desactivar producto?')"><button class="danger small">Desactivar</button></form></details></td></tr>{% endfor %}
+</table></div></div>
+<script>function filterTable(){let q=document.getElementById('filter').value.toLowerCase();document.querySelectorAll('#ptable tr').forEach((r,i)=>{if(i)r.style.display=r.innerText.toLowerCase().includes(q)?'':'none'})}</script>
+{% endblock %}

@@ -1,0 +1,4 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><h1>Proveedores</h1><span class="badge">Solo administrador</span></div>
+<div class="card"><h2>Nuevo proveedor</h2><form method="post" class="formgrid"><input name="name" placeholder="Nombre / razón social" required><input name="phone" placeholder="Teléfono"><input name="notes" placeholder="Notas"><button>Agregar</button></form></div>
+<div class="card"><div class="tablewrap"><table><tr><th>Proveedor</th><th>Teléfono</th><th>Notas</th></tr>{% for s in suppliers %}<tr><td>{{s.name}}</td><td>{{s.phone or '-'}}</td><td>{{s.notes or '-'}}</td></tr>{% endfor %}</table></div></div>{% endblock %}

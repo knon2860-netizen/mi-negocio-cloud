@@ -1,0 +1,109 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><h1>Compras / Entrada de stock</h1><span class="badge">Solo administrador</span></div>
+<div class="grid two">
+  <div class="card">
+    <h2>Cargar compra</h2>
+    <label>Proveedor
+      <select id="supplier"><option value="">Sin proveedor</option>{% for s in suppliers %}<option value="{{s.id}}">{{s.name}}</option>{% endfor %}</select>
+    </label>
+
+    <div class="scanrow">
+      <input id="psearch" placeholder="Buscar producto..." oninput="filterP()">
+      <button type="button" onclick="selectFirstProduct()">Seleccionar</button>
+    </div>
+    <div id="plist" class="product-list">
+      {% for p in products %}
+      <button type="button" class="product" data-id="{{p.id}}" data-name="{{p.name|lower}}" data-display="{{p.name|e}}" data-stock="{{p.stock}}" onclick='selectP({{p.id}}, {{p.name|tojson}}, {{p.stock}})'>
+        <span><b>{{p.name}}</b><small>Stock actual: {{p.stock}}</small></span>
+        <span class="product-price">$ {{(p.buy_price or 0)|ars}}</span>
+      </button>
+      {% endfor %}
+    </div>
+
+    <div id="selectedBox" class="selected-product hidden">
+      <div class="selected-title">Producto seleccionado</div>
+      <div id="selectedName" class="selected-name"></div>
+      <div id="selectedStock" class="selected-info"></div>
+      <div class="quantity-row">
+        <label>Cantidad
+          <input id="pqty" type="number" step="0.01" min="0.01" value="1">
+        </label>
+        <label style="flex:1">Costo unitario
+          <input id="pcost" type="number" step="0.01" min="0" value="0" onkeydown="if(event.key==='Enter'){event.preventDefault();addSelectedP()}">
+        </label>
+        <button type="button" class="add-cart-btn" onclick="addSelectedP()">✓ Agregar a la compra</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Detalle de la compra</h2>
+    <div id="pcart"></div>
+    <div class="totalline"><span>Total compra</span><strong>$ <span id="ptotal">0.00</span></strong></div>
+    <form method="post" action="/purchases" onsubmit="return submitPurchase()">
+      <input type="hidden" name="items" id="pitems">
+      <input type="hidden" name="supplier_id" id="psupplier">
+      <button class="big finish-sale" type="submit">Registrar compra y actualizar stock</button>
+    </form>
+  </div>
+</div>
+
+<div class="card"><h2>Compras recientes</h2><div class="tablewrap"><table><tr><th>#</th><th>Fecha</th><th>Proveedor</th><th>Usuario</th><th>Total</th></tr>{% for p in purchases %}<tr><td>#{{p.id}}</td><td>{{p.created_at}}</td><td>{{p.supplier}}</td><td>{{p.username}}</td><td>$ {{p.total|ars}}</td></tr>{% endfor %}</table></div></div>
+
+<script>
+let pcart=[];
+let selectedP=null;
+
+function formatARS(n){let s=Number(n||0).toFixed(2),parts=s.split('.'),int=Number(parts[0]).toLocaleString('es-AR');return parts[1]==='00'?int:int+','+parts[1]}
+
+function selectP(id,name,stock){
+  selectedP={id:id,name:name,stock:Number(stock)||0};
+  document.getElementById('selectedBox').classList.remove('hidden');
+  document.getElementById('selectedName').textContent=name;
+  document.getElementById('selectedStock').textContent='Stock actual: '+(Number(stock)||0);
+  document.getElementById('pqty').value=1;
+  document.getElementById('pcost').value=0;
+  document.getElementById('pcost').focus();
+  document.querySelectorAll('#plist .product').forEach(x=>x.classList.remove('selected'));
+  let buttons=[...document.querySelectorAll('#plist .product')];
+  let b=buttons.find(x=>Number(x.dataset.id)===Number(id)); if(b)b.classList.add('selected');
+}
+
+function addSelectedP(){
+  if(!selectedP){alert('Primero seleccioná un producto.');return;}
+  let qty=parseFloat(document.getElementById('pqty').value)||0;
+  let cost=parseFloat(document.getElementById('pcost').value);
+  if(qty<=0){alert('La cantidad debe ser mayor a 0.');document.getElementById('pqty').focus();return;}
+  if(!Number.isFinite(cost)||cost<0){alert('Ingresá un costo válido.');document.getElementById('pcost').focus();return;}
+  let x=pcart.find(a=>a.id===selectedP.id);
+  if(x){x.qty+=qty;x.cost=cost;}else pcart.push({id:selectedP.id,name:selectedP.name,qty:qty,cost:cost});
+  renderP();
+  document.getElementById('pqty').value=1;
+  document.getElementById('pcost').value=cost;
+  document.getElementById('pcost').focus();
+}
+
+function renderP(){
+  let h='',t=0;
+  pcart.forEach((x,i)=>{
+    let s=x.qty*x.cost;t+=s;
+    h+=`<div class="cartrow"><div><b>${escapeHtml(x.name)}</b><small>Cantidad: ${x.qty}</small></div><label style="margin:0"><small>Cantidad</small><input type="number" step="0.01" min="0.01" value="${x.qty}" onchange="changeQty(${i},this.value)"></label><label style="margin:0"><small>Costo unit.</small><input type="number" step="0.01" min="0" value="${x.cost}" onchange="changeCost(${i},this.value)"></label><strong>$${formatARS(s)}</strong><button type="button" onclick="pcart.splice(${i},1);renderP()">×</button></div>`;
+  });
+  document.getElementById('pcart').innerHTML=h||'<p class="muted">Todavía no hay productos en la compra.</p>';
+  document.getElementById('ptotal').textContent=formatARS(t);
+}
+function changeQty(i,v){let n=parseFloat(v)||0;if(n<=0){alert('La cantidad debe ser mayor a 0.');renderP();return;}pcart[i].qty=n;renderP()}
+function changeCost(i,v){let n=parseFloat(v);if(!Number.isFinite(n)||n<0){alert('Costo inválido.');renderP();return;}pcart[i].cost=n;renderP()}
+function filterP(){let q=document.getElementById('psearch').value.toLowerCase().trim();document.querySelectorAll('#plist .product').forEach(x=>x.style.display=x.dataset.name.includes(q)?'flex':'none')}
+function selectFirstProduct(){let el=[...document.querySelectorAll('#plist .product')].find(x=>x.style.display!=='none');if(el)el.click();else alert('No se encontró ese producto.')}
+function submitPurchase(){
+  if(!pcart.length){alert('La compra está vacía. Seleccioná un producto y tocá "Agregar a la compra".');return false}
+  if(pcart.some(x=>!(x.qty>0)||!Number.isFinite(Number(x.cost))||Number(x.cost)<0)){alert('Revisá cantidades y costos.');return false}
+  document.getElementById('pitems').value=JSON.stringify(pcart);
+  document.getElementById('psupplier').value=document.getElementById('supplier').value;
+  return true;
+}
+function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+renderP();
+</script>
+{% endblock %}

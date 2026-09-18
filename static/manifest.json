@@ -1,0 +1,9 @@
+{
+  "name":"Mi Negocio",
+  "short_name":"Mi Negocio",
+  "start_url":"/dashboard",
+  "display":"standalone",
+  "background_color":"#f3f4f6",
+  "theme_color":"#111827",
+  "lang":"es"
+}

@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><h1>Reportes</h1><span class="badge">Solo administrador</span></div>
+<div class="card"><form class="toolbar" method="get"><label>Fecha <input type="date" name="date" value="{{day}}"></label><button>Ver día</button></form></div>
+<div class="grid stats"><div class="card stat"><span>Ventas</span><strong>$ {{totals.total|ars}}</strong><small>{{totals.n}} operaciones</small></div><div class="card stat"><span>Costo</span><strong>$ {{cost|ars}}</strong></div><div class="card stat"><span>Ganancia estimada</span><strong>$ {{profit|ars}}</strong></div></div>
+<div class="grid two"><div class="card"><h2>Por forma de pago</h2><div class="tablewrap"><table><tr><th>Pago</th><th>Ventas</th><th>Total</th></tr>{% for p in payments %}<tr><td>{{p.payment}}</td><td>{{p.n}}</td><td>$ {{p.total|ars}}</td></tr>{% endfor %}</table></div></div>
+<div class="card"><h2>Productos más vendidos</h2><div class="tablewrap"><table><tr><th>Producto</th><th>Cantidad</th><th>Total</th></tr>{% for p in top %}<tr><td>{{p.name}}</td><td>{{p.qty}}</td><td>$ {{p.total|ars}}</td></tr>{% endfor %}</table></div></div></div>{% endblock %}

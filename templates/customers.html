@@ -1,0 +1,7 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><h1>Clientes / Fiados</h1><span class="badge">Cuenta corriente</span></div>
+<div class="card"><h2>Nuevo cliente</h2><form method="post" class="formgrid"><input name="name" placeholder="Nombre" required><input name="phone" placeholder="Teléfono"><input name="address" placeholder="Dirección"><button>Agregar</button></form></div>
+<div class="card"><div class="toolbar"><input id="filter" placeholder="Buscar cliente..." oninput="filterTable()"></div><div class="tablewrap"><table id="ctable"><tr><th>Cliente</th><th>Teléfono</th><th>Saldo</th><th>Acciones</th></tr>
+{% for c in customers %}<tr><td><b>{{c.name}}</b></td><td>{{c.phone or '-'}}</td><td class="{{'debt' if c.balance>0 else ''}}">$ {{c.balance|ars}}</td><td><a class="btn small" href="/account/{{c.id}}">Ver cuenta</a>{% if c.balance>0 %}<form method="post" action="/customers/{{c.id}}/payment" class="inline"><input name="amount" type="number" step="0.01" min="0.01" max="{{c.balance}}" placeholder="Pago" required><button class="small">Cobrar pago</button></form>{% endif %}</td></tr>{% endfor %}</table></div></div>
+<script>function filterTable(){let q=document.getElementById('filter').value.toLowerCase();document.querySelectorAll('#ctable tr').forEach((r,i)=>{if(i)r.style.display=r.innerText.toLowerCase().includes(q)?'':'none'})}</script>
+{% endblock %}

@@ -1,0 +1,178 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><div><h1>Nueva venta</h1><p class="muted">Elegí un producto, indicá la cantidad y después agregalo al carrito.</p></div>{% if not cash_open and session.role=='admin' %}<a class="btn" href="/cash">Abrir caja</a>{% endif %}</div>
+
+<div class="sale-layout">
+  <div class="card">
+    <h2>1. Elegir producto</h2>
+    <div class="scanrow">
+      <input id="search" placeholder="Buscar por nombre o código..." oninput="filterProducts()" autofocus>
+      <button type="button" class="scanbtn" onclick="scanBarcode()">📷 Escanear código</button>
+    </div>
+
+    <div id="scanner" class="scanner hidden">
+      <video id="video" playsinline></video>
+      <button type="button" onclick="stopScan()">Cerrar cámara</button>
+    </div>
+
+    <div id="selectedProduct" class="selected-product hidden">
+      <div class="selected-title">Producto seleccionado</div>
+      <div class="selected-name" id="selectedName"></div>
+      <div class="selected-info" id="selectedInfo"></div>
+      <div id="fractionHelp" class="fraction-help hidden">Este producto se vende fraccionado. El stock está expresado en kg. Podés vender 1 kg o, por ejemplo, 700 gramos.</div>
+      <div class="quantity-row">
+        <label id="qtyModeLabel">Cantidad
+          <input id="selectedQty" type="number" min="1" step="1" value="1" inputmode="decimal">
+        </label>
+        <label id="unitLabel" class="hidden">Unidad
+          <select id="selectedUnit" onchange="updateQtyMode()"><option value="kg">Kilogramos</option><option value="g">Gramos</option></select>
+        </label>
+        <button type="button" class="big add-cart-btn" onclick="addSelected()">✓ Agregar al carrito</button>
+      </div>
+    </div>
+
+    <div id="products" class="product-list">
+      {% for p in products %}
+      <button type="button" class="product" data-id="{{p.id}}" data-name="{{p.name|lower}}" data-barcode="{{p.barcode or ''}}" data-pname="{{p.name}}" data-price="{{p.sell_price}}" data-stock="{{p.stock}}" data-fractional="{{p.fractional|default(0)}}" onclick="selectProduct(this)">
+        <span><b>{{p.name}}</b><small>Código: {{p.barcode or 'Sin código'}}</small></span>
+        <span class="product-price">$ {{p.sell_price|ars}}<small>Stock: {{p.stock}}</small></span>
+      </button>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card sticky">
+    <h2>2. Carrito</h2>
+    <div id="cart"></div>
+    <div class="totalline"><span>Total</span><strong>$ <span id="total">0.00</span></strong></div>
+    <form method="post" onsubmit="return submitSale()">
+      <input type="hidden" name="items" id="items">
+      <label>Cliente
+        <select name="customer_id" id="customer">
+          <option value="">Consumidor final</option>
+          {% for c in customers %}<option value="{{c.id}}">{{c.name}} · deuda ${{c.balance|ars}}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Forma de pago
+        <select name="payment" id="payment"><option value="efectivo">Efectivo</option><option value="transferencia">Transferencia</option><option value="fiado">Fiado</option></select>
+      </label>
+      {% if not cash_open %}<p class="warning">La caja está cerrada. Las ventas en efectivo requieren una caja abierta por el administrador.</p>{% endif %}
+      <button class="big finish-sale" type="submit">Finalizar venta</button>
+    </form>
+  </div>
+</div>
+
+<script>
+let cart=[];
+let selected=null;
+
+function formatARS(n){let s=Number(n||0).toFixed(2),parts=s.split('.'),int=Number(parts[0]).toLocaleString('es-AR');return parts[1]==='00'?int:int+','+parts[1]}
+
+function selectProduct(el){
+  selected={id:Number(el.dataset.id),name:el.dataset.pname,price:Number(el.dataset.price),stock:Number(el.dataset.stock),fractional:el.dataset.fractional==='1'};
+  document.querySelectorAll('.product.selected').forEach(x=>x.classList.remove('selected'));
+  el.classList.add('selected');
+  document.getElementById('selectedName').textContent=selected.name;
+  document.getElementById('selectedInfo').textContent='Precio: $'+formatARS(selected.price)+(selected.fractional?' / kg':'')+' · Stock actual: '+selected.stock+(selected.fractional?' kg':'');
+  document.getElementById('selectedQty').value=1;
+  document.getElementById('selectedUnit').value='kg';
+  updateQtyMode();
+  document.getElementById('fractionHelp').classList.toggle('hidden',!selected.fractional);
+  document.getElementById('unitLabel').classList.toggle('hidden',!selected.fractional);
+  document.getElementById('selectedProduct').classList.remove('hidden');
+  document.getElementById('selectedQty').focus();
+}
+
+function addSelected(){
+  if(!selected)return;
+  let raw=parseFloat(document.getElementById('selectedQty').value);
+  if(!Number.isFinite(raw)||raw<=0){alert('La cantidad debe ser mayor a 0.');return;}
+  let qty=selected.fractional && document.getElementById('selectedUnit').value==='g' ? raw/1000 : raw;
+  if(selected.fractional){ if(raw!==Math.round(raw) && document.getElementById('selectedUnit').value==='g'){alert('Ingresá gramos enteros, por ejemplo 700.');return;} if(qty*1000>Math.round(qty*1000)){alert('La cantidad debe expresarse en gramos enteros.');return;} } else if(!Number.isInteger(raw)){alert('Este producto se vende por unidades enteras.');return;}
+  addToCart(selected,qty);
+}
+
+function addToCart(p,qty){
+  // Regla del negocio: se permite vender aunque el stock sea insuficiente.
+  // El stock puede quedar negativo y la reposición posterior lo recupera.
+  let x=cart.find(a=>a.id===p.id);
+  if(x){
+    x.qty+=qty;
+  }else{
+    cart.push({id:p.id,name:p.name,price:p.price,basePrice:p.price,stock:p.stock,qty:qty,fractional:p.fractional});
+  }
+  render();
+  document.getElementById('selectedProduct').classList.add('hidden');
+  document.querySelectorAll('.product.selected').forEach(x=>x.classList.remove('selected'));
+  selected=null;
+  document.getElementById('search').focus();
+}
+
+function render(){
+  let h='',total=0;
+  cart.forEach((x,i)=>{
+    let s=x.qty*x.price; total+=s;
+    let diff=x.basePrice>0 ? ((1-(x.price/x.basePrice))*100) : 0;
+    let priceNote=Math.abs(x.price-x.basePrice)<0.005 ? 'Precio de lista' : (diff>0 ? 'Descuento '+formatARS(diff)+'%' : 'Precio especial');
+    h+=`<div class="cartrow"><div><b>${escapeHtml(x.name)}</b><small>${formatQty(x.qty,x.fractional)} × precio aplicado</small><div style="margin-top:6px"><label style="font-size:.85em">Precio de esta venta <input class="sale-price-input" type="number" min="0.01" step="0.01" value="${x.price.toFixed(2)}" onchange="changePrice(${i},this.value)"></label><small>Lista: $${formatARS(x.basePrice)} · ${priceNote}</small></div></div><strong>$${formatARS(s)}</strong><div class="cart-buttons"><button type="button" onclick="dec(${i})">−</button><button type="button" onclick="inc(${i})">+</button><button type="button" onclick="removeItem(${i})">×</button></div></div>`;
+  });
+  document.getElementById('cart').innerHTML=h||'<p class="muted">Todavía no agregaste productos.</p>';
+  document.getElementById('total').textContent=formatARS(total);
+}
+function changePrice(i,value){
+  let price=Number(value);
+  if(!Number.isFinite(price)||price<=0){alert('El precio debe ser mayor a 0.');render();return;}
+  if(price>cart[i].basePrice+0.000001 && '{{session.role}}'==='employee'){
+    alert('Como empleado, podés aplicar un precio igual o menor al precio de lista.');
+    render();
+    return;
+  }
+  cart[i].price=Number(price.toFixed(2));
+  render();
+}
+function inc(i){let step=cart[i].fractional?0.001:1;cart[i].qty=Number((cart[i].qty+step).toFixed(3));render()}
+function dec(i){cart[i].qty--;if(cart[i].qty<=0)cart.splice(i,1);render()}
+function removeItem(i){cart.splice(i,1);render()}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]))}
+function filterProducts(){let q=document.getElementById('search').value.toLowerCase().trim();document.querySelectorAll('.product').forEach(x=>x.style.display=(x.dataset.name.includes(q)||x.dataset.barcode.toLowerCase().includes(q))?'flex':'none')}
+function submitSale(){
+  if(!cart.length){alert('El carrito está vacío. Seleccioná un producto, indicá la cantidad y presioná "Agregar al carrito".');return false}
+  if(document.getElementById('payment').value==='fiado'&&!document.getElementById('customer').value){alert('Seleccioná un cliente para el fiado');return false}
+  document.getElementById('items').value=JSON.stringify(cart.map(x=>({id:x.id,qty:x.qty,unit_price:x.price})));
+  return true;
+}
+
+let stream=null,detector=null;
+async function scanBarcode(){
+  if(!('BarcodeDetector' in window)){alert('Tu navegador no soporta escaneo de código de barras. Podés buscar el producto por nombre o escribir el código en el buscador.');return}
+  try{
+    document.getElementById('scanner').classList.remove('hidden');
+    let v=document.getElementById('video');
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}}});
+    v.srcObject=stream; await v.play();
+    detector=new BarcodeDetector({formats:['ean_13','ean_8','upc_a','upc_e','code_128']});
+    scanLoop();
+  }catch(e){stopScan();alert('No se pudo abrir la cámara. Revisá el permiso de cámara del navegador.');}
+}
+async function scanLoop(){
+  if(!stream)return;
+  try{
+    let codes=await detector.detect(document.getElementById('video'));
+    if(codes.length){
+      let code=codes[0].rawValue;
+      document.getElementById('search').value=code;
+      filterProducts();
+      let el=[...document.querySelectorAll('.product')].find(x=>x.dataset.barcode===code);
+      if(el){selectProduct(el);stopScan();return}
+      alert('Código escaneado: '+code+'\nNo encontré un producto con ese código.');stopScan();return;
+    }
+  }catch(e){}
+  requestAnimationFrame(scanLoop);
+}
+function stopScan(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}document.getElementById('scanner').classList.add('hidden')}
+
+function updateQtyMode(){if(!selected||!selected.fractional)return;let g=document.getElementById('selectedUnit').value==='g';let input=document.getElementById('selectedQty');input.step=g?'1':'0.001';input.min=g?'1':'0.001';input.value=g?'700':'1';document.getElementById('qtyModeLabel').firstChild.textContent=g?'Cantidad en gramos':'Cantidad en kg'}
+function formatQty(q,f){if(!f)return Number(q).toLocaleString('es-AR');if(Math.abs(q-Math.round(q))<1e-9)return Number(q).toLocaleString('es-AR')+' kg';let g=Math.round(q*1000);return g+' g'}
+document.getElementById('selectedQty').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();addSelected()}});
+render();
+</script>
+{% endblock %}

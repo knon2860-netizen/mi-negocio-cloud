@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><div><h1>Estadísticas</h1><p class="muted">Resumen de rentabilidad y formas de pago</p></div><span class="badge">Solo administrador</span></div>
+<div class="card"><form class="toolbar" method="get"><label>Fecha <input type="date" name="date" value="{{day}}"></label><button>Ver día</button></form></div>
+<div class="grid stats">
+<div class="card stat"><span>Ventas</span><strong>$ {{totals.total|ars}}</strong><small>{{totals.n}} operaciones</small></div>
+<div class="card stat"><span>Costo de lo vendido</span><strong>$ {{cost|ars}}</strong></div>
+<div class="card stat"><span>Ganancia estimada</span><strong>$ {{profit|ars}}</strong></div>
+<div class="card stat"><span>Ganancia sobre costo</span><strong>{{'%.2f'|format(markup)}} %</strong><small>Ganancia ÷ costo</small></div>
+<div class="card stat"><span>Margen sobre venta</span><strong>{{'%.2f'|format(margin)}} %</strong><small>Ganancia ÷ ventas</small></div>
+</div>
+<div class="grid three">
+<div class="card"><h2>Efectivo</h2><strong>$ {{payments.cash|ars}}</strong><p>{{'%.2f'|format(cash_pct)}} % de las ventas</p></div>
+<div class="card"><h2>Transferencias</h2><strong>$ {{payments.transfer|ars}}</strong><p>{{'%.2f'|format(transfer_pct)}} % de las ventas</p></div>
+<div class="card"><h2>Fiado</h2><strong>$ {{payments.credit|ars}}</strong><p>{{'%.2f'|format(credit_pct)}} % de las ventas</p></div>
+</div>
+<div class="card"><h2>Cómo se calcula</h2><p><b>Ganancia estimada</b> = ventas − costo de los productos vendidos.</p><p><b>Ganancia sobre costo</b> = ganancia ÷ costo × 100.</p><p><b>Margen sobre venta</b> = ganancia ÷ ventas × 100.</p><p class="muted">Los porcentajes corresponden al día seleccionado y son estimados según el costo de compra registrado de cada producto.</p></div>
+{% endblock %}

@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><div><h1>Panel principal</h1><p class="muted">Resumen del negocio</p></div>{% if session.role=='admin' %}<a class="btn" href="/cash">💵 Caja del día</a>{% endif %}</div>
+<div class="grid stats">
+<div class="card stat"><span>Ventas de hoy</span><strong>$ {{sales_today.total|ars}}</strong><small>{{sales_today.n}} ventas</small></div>
+<div class="card stat"><span>Ganancia estimada</span><strong>$ {{profit|ars}}</strong><small>según costo cargado</small></div>
+<div class="card stat"><span>Stock bajo</span><strong>{{low}}</strong><small>productos</small></div>
+<div class="card stat"><span>Fiados pendientes</span><strong>$ {{debt|ars}}</strong><small>saldo total</small></div>
+</div>
+<div class="grid two">
+<div class="card"><h2>Acciones rápidas</h2><div class="actions"><a class="btn big" href="/new-sale">➕ Nueva venta</a><a class="btn" href="/customers">👤 Clientes / fiados</a>{% if session.role=='admin' %}<a class="btn" href="/products">📦 Stock</a><a class="btn" href="/purchases">🚚 Registrar compra</a>{% endif %}</div></div>
+<div class="card"><h2>Permisos</h2>{% if session.role=='admin' %}<p>Tenés acceso total: precios, stock, compras, caja, reportes, empleados y respaldos.</p>{% else %}<p>Podés vender, cobrar, consultar ventas y gestionar lo necesario para clientes/fiados. No podés cambiar precios, stock ni configuración.</p>{% endif %}</div>
+</div>{% endblock %}

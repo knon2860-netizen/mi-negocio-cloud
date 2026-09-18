@@ -1,0 +1,65 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><div><h1>Cuenta corriente</h1><p class="muted">{{customer.name}}{% if customer.phone %} · {{customer.phone}}{% endif %}</p></div><a class="btn" href="/customers">← Volver</a></div>
+<div class="card">
+  <div class="balance"><span>Saldo actual</span><strong class="{{'debt' if customer.balance>0 else 'oktext'}}">$ {{customer.balance|ars}}</strong></div>
+  {% if customer.balance>0 %}
+  <div class="payment-panel">
+    <h2>Registrar pago</h2>
+    <p class="muted">Podés cancelar toda la deuda o hacer una entrega parcial. El saldo restante se actualiza automáticamente.</p>
+    <form method="post" action="/customers/{{customer.id}}/payment" class="payment-form">
+      <label>Monto a entregar
+        <input name="amount" type="number" step="0.01" min="0.01" max="{{customer.balance}}" placeholder="Ej.: 5000" required>
+      </label>
+      <div class="payment-actions">
+        <button type="submit" name="payment_mode" value="partial">Registrar entrega</button>
+        <button type="submit" name="amount" value="{{customer.balance}}" class="btn secondary">Pagar todo ($ {{customer.balance|ars}})</button>
+      </div>
+    </form>
+  </div>
+  {% else %}
+  <div class="paid-banner">✓ Cuenta al día. No hay saldo pendiente.</div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <div class="pagehead compact-head"><div><h2>Historial de cuenta</h2><p class="muted">Fiados y pagos, del más reciente al más antiguo.</p></div></div>
+  <div class="account-history">
+  {% for m in movements %}
+    {% if m.type == 'sale' and m.sale_id %}
+      <div class="account-entry debt-entry">
+        <div class="entry-head">
+          <div><strong>Fiado · Venta #{{m.sale_id}}</strong><div class="muted">{{m.created_at}}{% if m.sale_user %} · {{m.sale_user}}{% endif %}</div></div>
+          <strong class="debt">+ $ {{m.amount|ars}}</strong>
+        </div>
+        {% if m.items %}
+        <div class="fiado-detail">
+          <div class="detail-title">Detalle de la venta</div>
+          {% for i in m["items"] %}
+          <div class="detail-row">
+            <span>{{i.name}} × {% if i.qty == i.qty|round(0) %}{{i.qty|int}}{% else %}{{i.qty}}{% endif %}</span>
+            <span>$ {{i.subtotal|ars}}</span>
+          </div>
+          {% endfor %}
+          <div class="detail-total"><span>Total fiado</span><strong>$ {{m.sale_total|ars}}</strong></div>
+        </div>
+        {% endif %}
+      </div>
+    {% elif m.type == 'payment' %}
+      <div class="account-entry payment-entry">
+        <div class="entry-head">
+          <div><strong>Pago / entrega</strong><div class="muted">{{m.created_at}}</div></div>
+          <strong class="oktext">− $ {{(-m.amount)|ars}}</strong>
+        </div>
+        <div class="muted">{{m.note or 'Pago de cuenta'}}</div>
+      </div>
+    {% else %}
+      <div class="account-entry">
+        <div class="entry-head"><div><strong>{{m.note or m.type}}</strong><div class="muted">{{m.created_at}}</div></div><strong>$ {{m.amount|ars}}</strong></div>
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="paid-banner">Todavía no hay movimientos en esta cuenta.</div>
+  {% endfor %}
+  </div>
+</div>
+{% endblock %}
