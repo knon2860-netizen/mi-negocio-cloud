@@ -124,8 +124,7 @@ def apply_op(c,op):
 
 # Ensure central sync tables exist after app schema.
 c=app.view_functions and None
-conn=__import__('app').db(); conn.execute('''CREATE TABLE IF NOT EXISTS operations(seq BIGSERIAL PRIMARY KEY,op_id TEXT UNIQUE NOT NULL,device_id TEXT NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL,received_at TEXT NOT NULL)''') if DATABASE_URL else None
-conn.execute('''CREATE TABLE IF NOT EXISTS applied_operations(op_id TEXT PRIMARY KEY,applied_at TEXT NOT NULL)''') if DATABASE_URL else None
+conn=__import__('app').db(); conn.execute('''CREATE TABLE IF NOT EXISTS applied_operations(op_id TEXT PRIMARY KEY,applied_at TEXT NOT NULL)''') 
 conn.commit(); conn.close()
 
 from flask import request,jsonify
