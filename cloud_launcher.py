@@ -110,7 +110,7 @@ def apply_op(c,op):
         cash=None
         if pay=='efectivo':
             cash=c.execute("SELECT * FROM cash_sessions WHERE status='open' ORDER BY id DESC LIMIT 1").fetchone()
-        c.execute('INSERT INTO sales(id,user_id,customer_id,cash_session_id,total,payment,created_at) VALUES(?,?,?,?,?,?,?)',(sid,uid,cid,cash['id'] if cash else None,float(p.get('total') or 0),pay,p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds'),before,after))
+        c.execute('INSERT INTO sales(id,user_id,customer_id,cash_session_id,total,payment,created_at) VALUES(?,?,?,?,?,?,?)',(sid,uid,cid,cash['id'] if cash else None,float(p.get('total') or 0),pay,p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
         for it in items:
             pid=int(it.get('product_id') or 0)
             if not pid: continue
@@ -143,9 +143,10 @@ def apply_op(c,op):
     c.execute('INSERT INTO applied_operations(op_id,applied_at) VALUES(?,?) ON CONFLICT(op_id) DO NOTHING',(oid,__import__('datetime').datetime.now().isoformat(timespec='seconds'))); return True
 
 # Ensure central sync tables exist after app schema.
-c=app.view_functions and None
-conn=__import__('app').db(); conn.execute('''CREATE TABLE IF NOT EXISTS operations(seq BIGSERIAL PRIMARY KEY,op_id TEXT UNIQUE NOT NULL,device_id TEXT NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL,received_at TEXT NOT NULL)''') if DATABASE_URL else None
-conn.execute('''CREATE TABLE IF NOT EXISTS applied_operations(op_id TEXT PRIMARY KEY,applied_at TEXT NOT NULL)''') if DATABASE_URL else None
+conn=__import__('app').db()
+if DATABASE_URL:
+    conn.execute('''CREATE TABLE IF NOT EXISTS operations(seq BIGSERIAL PRIMARY KEY,op_id TEXT UNIQUE NOT NULL,device_id TEXT NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL,received_at TEXT NOT NULL)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS applied_operations(op_id TEXT PRIMARY KEY,applied_at TEXT NOT NULL)''')
 conn.commit(); conn.close()
 
 from flask import request,jsonify
