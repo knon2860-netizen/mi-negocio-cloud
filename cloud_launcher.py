@@ -67,6 +67,18 @@ if DATABASE_URL: sqlite3.connect=connect_proxy
 from app import app, init_db
 init_db()
 
+# Mantiene sincronizada la base central con el servidor de sincronización cada 60 segundos.
+# No cambia el intervalo de Windows ni agrega otra frecuencia.
+import threading
+_sync_stop = threading.Event()
+def _cloud_sync_worker():
+    try:
+        from sync_client import worker_loop
+        worker_loop(_sync_stop, interval=60)
+    except Exception:
+        pass
+threading.Thread(target=_cloud_sync_worker, daemon=True).start()
+
 VALID_OPS={'PRODUCT_UPSERT','CUSTOMER_UPSERT','SUPPLIER_UPSERT','SALE','PURCHASE','CUSTOMER_PAYMENT','CASH_MOVEMENT','STOCK_ADJUSTMENT','AUDIT'}
 def key_ok(req): return bool(SYNC_KEY) and req.headers.get('X-MiNegocio-Key','')==SYNC_KEY
 
@@ -75,8 +87,16 @@ def apply_op(c,op):
     if not oid or typ not in VALID_OPS: return False
     if c.execute('SELECT 1 FROM applied_operations WHERE op_id=?',(oid,)).fetchone(): return False
     if typ=='PRODUCT_UPSERT':
-        if not p.get('id') or not p.get('name'): return False
-        c.execute('''INSERT INTO products(id,barcode,name,category,buy_price,sell_price,stock,min_stock,fractional,active) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET barcode=excluded.barcode,name=excluded.name,category=excluded.category,buy_price=excluded.buy_price,sell_price=excluded.sell_price,min_stock=excluded.min_stock,fractional=excluded.fractional,active=excluded.active''',tuple(p.get(x) for x in ['id','barcode','name','category','buy_price','sell_price','stock','min_stock','fractional','active']))
+        if not p.get('id'): return False
+        # Para un borrado/desactivación, Windows envía id + active=0.
+        # No hace falta exigir el nombre para aplicar el borrado.
+        if int(p.get('active', 1) or 0) == 0:
+            c.execute('UPDATE products SET active=0 WHERE id=?',(int(p['id']),))
+            if p.get('barcode'):
+                c.execute('UPDATE products SET active=0 WHERE barcode=?',(str(p.get('barcode')),))
+        else:
+            if not p.get('name'): return False
+            c.execute('''INSERT INTO products(id,barcode,name,category,buy_price,sell_price,stock,min_stock,fractional,active) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET barcode=excluded.barcode,name=excluded.name,category=excluded.category,buy_price=excluded.buy_price,sell_price=excluded.sell_price,min_stock=excluded.min_stock,fractional=excluded.fractional,active=excluded.active''',tuple(p.get(x) for x in ['id','barcode','name','category','buy_price','sell_price','stock','min_stock','fractional','active']))
     elif typ=='CUSTOMER_UPSERT':
         if not p.get('id') or not p.get('name'): return False
         c.execute('''INSERT INTO customers(id,name,phone,address,balance,active) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,phone=excluded.phone,address=excluded.address,active=excluded.active''',tuple(p.get(x) for x in ['id','name','phone','address','balance','active']))
@@ -90,7 +110,7 @@ def apply_op(c,op):
         cash=None
         if pay=='efectivo':
             cash=c.execute("SELECT * FROM cash_sessions WHERE status='open' ORDER BY id DESC LIMIT 1").fetchone()
-        c.execute('INSERT INTO sales(id,user_id,customer_id,cash_session_id,total,payment,created_at) VALUES(?,?,?,?,?,?,?)',(sid,uid,cid,cash['id'] if cash else None,float(p.get('total') or 0),pay,p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
+        c.execute('INSERT INTO sales(id,user_id,customer_id,cash_session_id,total,payment,created_at) VALUES(?,?,?,?,?,?,?)',(sid,uid,cid,cash['id'] if cash else None,float(p.get('total') or 0),pay,p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds'),before,after))
         for it in items:
             pid=int(it.get('product_id') or 0)
             if not pid: continue
@@ -118,13 +138,14 @@ def apply_op(c,op):
     elif typ=='STOCK_ADJUSTMENT':
         pid=int(p.get('product_id') or 0); qty=float(p.get('qty') or 0); row=c.execute('SELECT stock FROM products WHERE id=?',(pid,)).fetchone()
         if not pid or qty==0 or not row: return False
-        before=float(row['stock'] or 0); after=before+qty; c.execute('UPDATE products SET stock=? WHERE id=?',(after,pid)); c.execute('INSERT INTO stock_movements(op_id,product_id,qty,reason,note,user_id,device_id,created_at,stock_before,stock_after) VALUES(?,?,?,?,?,?,?,?,?,?)',(oid,pid,qty,str(p.get('reason') or 'otro'),str(p.get('note') or ''),int(p.get('user_id') or 1),str(p.get('device_id') or op.get('device_id') or ''),p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
+        before=float(row['stock'] or 0); after=before+qty; c.execute('UPDATE products SET stock=? WHERE id=?',(after,pid)); c.execute('INSERT INTO stock_movements(op_id,product_id,qty,reason,note,user_id,device_id,created_at,stock_before,stock_after) VALUES(?,?,?,?,?,?,?,?,?,?)',(oid,pid,qty,str(p.get('reason') or 'otro'),str(p.get('note') or ''),int(p.get('user_id') or 1),str(p.get('device_id') or op.get('device_id') or ''),p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds'),before,after))
     elif typ=='AUDIT': c.execute('INSERT INTO audit_log(user_id,action,detail,created_at) VALUES(?,?,?,?)',(int(p.get('user_id') or 1),str(p.get('action') or 'SYNC'),str(p.get('detail') or ''),p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
     c.execute('INSERT INTO applied_operations(op_id,applied_at) VALUES(?,?) ON CONFLICT(op_id) DO NOTHING',(oid,__import__('datetime').datetime.now().isoformat(timespec='seconds'))); return True
 
 # Ensure central sync tables exist after app schema.
 c=app.view_functions and None
-conn=__import__('app').db(); conn.execute('''CREATE TABLE IF NOT EXISTS applied_operations(op_id TEXT PRIMARY KEY,applied_at TEXT NOT NULL)''') 
+conn=__import__('app').db(); conn.execute('''CREATE TABLE IF NOT EXISTS operations(seq BIGSERIAL PRIMARY KEY,op_id TEXT UNIQUE NOT NULL,device_id TEXT NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL,received_at TEXT NOT NULL)''') if DATABASE_URL else None
+conn.execute('''CREATE TABLE IF NOT EXISTS applied_operations(op_id TEXT PRIMARY KEY,applied_at TEXT NOT NULL)''') if DATABASE_URL else None
 conn.commit(); conn.close()
 
 from flask import request,jsonify
@@ -162,5 +183,14 @@ def bootstrap():
                 cols=list(r.keys()); c.execute(f'INSERT INTO {t}({",".join(cols)}) VALUES({",".join(["?"]*len(cols))}) ON CONFLICT DO NOTHING',[r[k] for k in cols])
         c.execute('INSERT INTO metadata(key,value) VALUES(?,?)',('snapshot',json.dumps({'source':data.get('source',''),'device_id':data.get('device_id','')}))); c.commit(); c.close(); return jsonify(ok=True,created=True)
     except Exception: c.rollback(); c.close(); return jsonify(ok=False,error='server_database_error'),500
+
+# Sincronización automática entre la base web y el servidor central.
+# Se inicia después de cargar todas las rutas para evitar ciclos de importación.
+if os.environ.get("MI_NEGOCIO_SYNC_URL") and os.environ.get("MI_NEGOCIO_SYNC_KEY"):
+    import threading
+    from sync_client import worker_loop
+    _sync_stop = threading.Event()
+    _sync_thread = threading.Thread(target=worker_loop, args=(_sync_stop, 60), daemon=True, name="mi-negocio-sync")
+    _sync_thread.start()
 
 if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.environ.get('PORT','8080')),debug=False)
