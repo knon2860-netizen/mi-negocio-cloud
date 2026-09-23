@@ -77,7 +77,7 @@ def _cloud_sync_worker():
         worker_loop(_sync_stop, interval=60)
     except Exception:
         pass
-threading.Thread(target=_cloud_sync_worker, daemon=True).start()
+# threading.Thread(target=_cloud_sync_worker, daemon=True).start()
 
 VALID_OPS={'PRODUCT_UPSERT','CUSTOMER_UPSERT','SUPPLIER_UPSERT','SALE','PURCHASE','CUSTOMER_PAYMENT','CASH_MOVEMENT','STOCK_ADJUSTMENT','AUDIT'}
 def key_ok(req): return bool(SYNC_KEY) and req.headers.get('X-MiNegocio-Key','')==SYNC_KEY
