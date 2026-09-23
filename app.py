@@ -118,6 +118,9 @@ def init_db():
       qty REAL NOT NULL, reason TEXT NOT NULL, note TEXT, user_id INTEGER NOT NULL,
       device_id TEXT NOT NULL, created_at TEXT NOT NULL, stock_before REAL NOT NULL, stock_after REAL NOT NULL,
       FOREIGN KEY(product_id) REFERENCES products(id), FOREIGN KEY(user_id) REFERENCES users(id)
+    );    CREATE TABLE IF NOT EXISTS applied_operations(
+      op_id TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL
     );
     """)
     # Migration: productos que pueden venderse fraccionados.
