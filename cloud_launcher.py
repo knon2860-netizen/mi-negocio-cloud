@@ -192,6 +192,6 @@ if os.environ.get("MI_NEGOCIO_SYNC_URL") and os.environ.get("MI_NEGOCIO_SYNC_KEY
     from sync_client import worker_loop
     _sync_stop = threading.Event()
     _sync_thread = threading.Thread(target=worker_loop, args=(_sync_stop, 60), daemon=True, name="mi-negocio-sync")
-    _sync_thread.start()
+    # _sync_thread.start()
 
 if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.environ.get('PORT','8080')),debug=False)
