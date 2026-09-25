@@ -133,12 +133,13 @@ def init_db():
     if "created_at" not in cols:
         c.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
         c.execute("UPDATE users SET created_at=? WHERE created_at IS NULL", (now(),))
-       user_count = c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
-    if user_count == 0:
-        c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
-                  ("admin", generate_password_hash("admin123"), "admin", 1, now()))
-        c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
-                  ("empleado", generate_password_hash("empleado123"), "employee", 1, now()))
+        user_count = c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+        if user_count == 0:
+            c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
+                      ("admin", generate_password_hash("admin123"), "admin", 1, now()))
+            c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
+                      ("empleado", generate_password_hash("empleado123"), "employee", 1, now()))
+       
     c.commit(); c.close()
 
 def sync_queue(c, op_type, payload):
