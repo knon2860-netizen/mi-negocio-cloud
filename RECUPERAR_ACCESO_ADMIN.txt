@@ -1,0 +1,11 @@
+RECUPERACION DE ACCESO ADMIN EN RENDER
+
+1) En el servicio mi-negocio-cloud agrega temporalmente la variable:
+   MI_NEGOCIO_RESET_ADMIN = 1
+2) Guarda y espera el deploy.
+3) Ingresa en https://mi-negocio-cloud.onrender.com/ con:
+   usuario: admin
+   clave: admin123
+4) Una vez confirmado el acceso, ELIMINA la variable MI_NEGOCIO_RESET_ADMIN y vuelve a desplegar/reiniciar.
+
+La variable es de uso temporal. No se recomienda dejarla activa porque restablece la clave admin a admin123 cada vez que inicia el servicio.

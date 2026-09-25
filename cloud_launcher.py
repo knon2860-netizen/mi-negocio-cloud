@@ -6,6 +6,14 @@ CLOUD_DEVICE_ID=os.environ.get('MI_NEGOCIO_CLOUD_DEVICE_ID','ANDROID-WEB').strip
 REAL_CONNECT=sqlite3.connect
 DB_PATH=os.path.abspath(os.environ.get('MI_NEGOCIO_DB','mi_negocio.db'))
 
+class CompatRow(dict):
+    """Fila PostgreSQL compatible con acceso por nombre y por índice, como sqlite3.Row."""
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
 class PGCursor:
     def __init__(self,conn): self.conn=conn; self.cur=conn.pg.cursor(); self._last_id=None
     @property
@@ -39,8 +47,11 @@ class PGCursor:
             except ImportError: pass
             raise
     def executemany(self,sql,seq): self.cur.executemany(sql.replace('?','%s'),seq); return self
-    def fetchone(self): return self.cur.fetchone()
-    def fetchall(self): return self.cur.fetchall()
+    def fetchone(self):
+        r=self.cur.fetchone()
+        return CompatRow(r) if r is not None else None
+    def fetchall(self):
+        return [CompatRow(r) for r in self.cur.fetchall()]
     def close(self): self.cur.close()
 
 class PGConn:

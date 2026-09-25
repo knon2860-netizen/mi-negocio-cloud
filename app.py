@@ -118,9 +118,6 @@ def init_db():
       qty REAL NOT NULL, reason TEXT NOT NULL, note TEXT, user_id INTEGER NOT NULL,
       device_id TEXT NOT NULL, created_at TEXT NOT NULL, stock_before REAL NOT NULL, stock_after REAL NOT NULL,
       FOREIGN KEY(product_id) REFERENCES products(id), FOREIGN KEY(user_id) REFERENCES users(id)
-    );    CREATE TABLE IF NOT EXISTS applied_operations(
-      op_id TEXT PRIMARY KEY,
-      applied_at TEXT NOT NULL
     );
     """)
     # Migration: productos que pueden venderse fraccionados.
@@ -133,18 +130,29 @@ def init_db():
     if "created_at" not in cols:
         c.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
         c.execute("UPDATE users SET created_at=? WHERE created_at IS NULL", (now(),))
-        user_count = c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
-        if user_count == 0:
+    user_count = c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+    if user_count == 0:
+        c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
+                  ("admin", generate_password_hash("admin123"), "admin", 1, now()))
+        c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
+                  ("empleado", generate_password_hash("empleado123"), "employee", 1, now()))
+
+    # Recuperacion de acceso inicial en la nube: solo se ejecuta cuando
+    # Render tiene MI_NEGOCIO_RESET_ADMIN=1. No modifica contrasenas en
+    # condiciones normales y permite conservar la funcion de cambio de clave.
+    if os.environ.get("MI_NEGOCIO_RESET_ADMIN", "").strip() == "1":
+        admin_row = c.execute("SELECT id FROM users WHERE username=?", ("admin",)).fetchone()
+        if admin_row:
+            c.execute("UPDATE users SET password=?, role=?, active=1 WHERE username=?",
+                      (generate_password_hash("admin123"), "admin", "admin"))
+        else:
             c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
                       ("admin", generate_password_hash("admin123"), "admin", 1, now()))
-            c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
-                      ("empleado", generate_password_hash("empleado123"), "employee", 1, now()))
-       
     c.commit(); c.close()
 
 def sync_queue(c, op_type, payload):
     import uuid
-    device_id=os.environ.get("MI_NEGOCIO_DEVICE_ID", "WINDOWS-001")
+    device_id=(os.environ.get("MI_NEGOCIO_DEVICE_ID") or os.environ.get("MI_NEGOCIO_CLOUD_DEVICE_ID") or "ANDROID-WEB")
     op_id=uuid.uuid4().hex
     c.execute("INSERT INTO sync_outbox(op_id,device_id,type,payload,created_at,synced) VALUES(?,?,?,?,?,?)",
               (op_id, device_id, op_type, json.dumps(payload, ensure_ascii=False), now(), 0))
@@ -286,14 +294,32 @@ def products():
     c=db()
     if request.method=="POST":
         d=request.form
+        barcode=(d.get("barcode") or "").strip() or None
         try:
-            c.execute("""INSERT INTO products(barcode,name,category,buy_price,sell_price,stock,min_stock,fractional)
-                         VALUES(?,?,?,?,?,?,?,?)""",
-                      (d.get("barcode") or None,d["name"].strip(),d.get("category","").strip(),
-                       float(d.get("buy_price") or 0),float(d.get("sell_price") or 0),
-                       float(d.get("stock") or 0),float(d.get("min_stock") or 0),1 if d.get("fractional") else 0))
-            c.commit(); sync_queue(c, "PRODUCT_UPSERT", {"id": c.execute("SELECT last_insert_rowid()").fetchone()[0], "barcode": d.get("barcode") or "", "name": d["name"].strip(), "category": d.get("category","").strip(), "buy_price": float(d.get("buy_price") or 0), "sell_price": float(d.get("sell_price") or 0), "stock": float(d.get("stock") or 0), "min_stock": float(d.get("min_stock") or 0), "fractional": 1 if d.get("fractional") else 0, "active": 1}); c.commit(); audit("PRODUCT_CREATE", d["name"].strip()); flash("Producto agregado.","ok")
-        except sqlite3.IntegrityError: c.rollback(); flash("El código de barras ya existe.","error")
+            values=(d["name"].strip(), d.get("category","").strip(),
+                    float(d.get("buy_price") or 0), float(d.get("sell_price") or 0),
+                    float(d.get("stock") or 0), float(d.get("min_stock") or 0),
+                    1 if d.get("fractional") else 0)
+            existing = c.execute("SELECT id,active FROM products WHERE barcode=?", (barcode,)).fetchone() if barcode else None
+            if existing:
+                if int(existing["active"] or 0) == 1:
+                    raise ValueError("El código de barras ya existe.")
+                # Reutiliza el producto inactivo en vez de bloquear el código por la restricción UNIQUE.
+                pid=int(existing["id"])
+                c.execute("UPDATE products SET name=?,category=?,buy_price=?,sell_price=?,stock=?,min_stock=?,fractional=?,active=1 WHERE id=?", values + (pid,))
+                new_id=pid
+            else:
+                c.execute("""INSERT INTO products(barcode,name,category,buy_price,sell_price,stock,min_stock,fractional)
+                             VALUES(?,?,?,?,?,?,?,?)""",
+                          (barcode,)+values)
+                new_id=c.execute("SELECT last_insert_rowid()").fetchone()[0]
+            c.commit()
+            sync_queue(c, "PRODUCT_UPSERT", {"id": new_id, "barcode": barcode or "", "name": values[0], "category": values[1], "buy_price": values[2], "sell_price": values[3], "stock": values[4], "min_stock": values[5], "fractional": values[6], "active": 1})
+            c.commit(); audit("PRODUCT_CREATE", values[0]); flash("Producto agregado.","ok")
+        except sqlite3.IntegrityError:
+            c.rollback(); flash("El código de barras ya existe.","error")
+        except ValueError as e:
+            c.rollback(); flash(str(e),"error")
     rows=c.execute("SELECT * FROM products WHERE active=1 ORDER BY name").fetchall()
     c.close()
     return render_template("products.html", products=rows)
@@ -304,13 +330,45 @@ def products():
 def edit_product(pid):
     d=request.form; c=db()
     try:
+        barcode=(d.get("barcode") or "").strip() or None
+        if barcode:
+            dup=c.execute("SELECT id,active FROM products WHERE barcode=? AND id<>?",(barcode,pid)).fetchone()
+            if dup:
+                if int(dup["active"] or 0)==1:
+                    raise ValueError("El código de barras ya existe.")
+                # Libera el código del producto inactivo para poder reutilizarlo aquí.
+                c.execute("UPDATE products SET barcode=NULL WHERE id=?",(int(dup["id"]),))
         c.execute("""UPDATE products SET barcode=?,name=?,category=?,buy_price=?,sell_price=?,min_stock=?,fractional=? WHERE id=?""",
-                  (d.get("barcode") or None,d["name"].strip(),d.get("category","").strip(),
+                  (barcode,d["name"].strip(),d.get("category","").strip(),
                    float(d.get("buy_price") or 0),float(d.get("sell_price") or 0),
                    float(d.get("min_stock") or 0),1 if d.get("fractional") else 0,pid))
-        c.commit(); row=c.execute("SELECT * FROM products WHERE id=?",(pid,)).fetchone(); sync_queue(c, "PRODUCT_UPSERT", {k: row[k] for k in row.keys() if k != "stock"} if row else {"id":pid}); c.commit(); audit("PRODUCT_EDIT", f"Producto #{pid}"); flash("Producto actualizado. El stock se modifica desde Ajustar stock.","ok")
+        row=c.execute("SELECT * FROM products WHERE id=?",(pid,)).fetchone()
+        stock_change_text=(d.get("stock_change") or "").strip()
+        stock_changed=False
+        if stock_change_text:
+            change=float(stock_change_text)
+            if not row: raise ValueError("Producto inexistente.")
+            if change != 0:
+                if not row["fractional"] and abs(change-round(change)) > 1e-9:
+                    raise ValueError(f"{row['name']} no admite cantidades decimales.")
+                if row["fractional"] and abs(change*1000-round(change*1000)) > 1e-8:
+                    raise ValueError(f"La cantidad fraccionada de {row['name']} debe ser de gramos enteros.")
+                before=float(row["stock"] or 0); after=before+change
+                import uuid
+                mop=uuid.uuid4().hex; created=now()
+                c.execute("UPDATE products SET stock=? WHERE id=?",(after,pid))
+                c.execute("INSERT INTO stock_movements(op_id,product_id,qty,reason,note,user_id,device_id,created_at,stock_before,stock_after) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                          (mop,pid,change,"correccion","Cambio de stock desde edición del producto",session["user_id"],stock_device_id(),created,before,after))
+                sync_queue(c,"STOCK_ADJUSTMENT",{"op_id":mop,"product_id":pid,"qty":change,"reason":"correccion","note":"Cambio de stock desde edición del producto","user_id":session["user_id"],"device_id":stock_device_id(),"created_at":created})
+                stock_changed=True
+        row=c.execute("SELECT * FROM products WHERE id=?",(pid,)).fetchone()
+        payload={k: row[k] for k in row.keys()} if row else {"id":pid}
+        sync_queue(c, "PRODUCT_UPSERT", payload)
+        c.commit(); audit("PRODUCT_EDIT", f"Producto #{pid}" + (f"; stock {row['stock']:g}" if stock_changed and row else "")); flash("Producto actualizado." + (" Stock actualizado." if stock_changed else ""), "ok")
     except sqlite3.IntegrityError:
         c.rollback(); flash("El código de barras ya existe.","error")
+    except ValueError as e:
+        c.rollback(); flash(str(e),"error")
     c.close()
     return redirect(url_for("products"))
 
@@ -318,7 +376,14 @@ def edit_product(pid):
 @login_required
 @admin_required
 def delete_product(pid):
-    c=db(); c.execute("UPDATE products SET active=0 WHERE id=?",(pid,)); sync_queue(c, "PRODUCT_UPSERT", {"id":pid,"active":0}); c.commit(); c.close()
+    c=db()
+    row=c.execute("SELECT * FROM products WHERE id=?",(pid,)).fetchone()
+    if not row:
+        c.close(); flash("Producto inexistente.","error"); return redirect(url_for("products"))
+    payload={"id":pid,"barcode":row["barcode"] or "","name":row["name"],"active":0}
+    c.execute("UPDATE products SET active=0 WHERE id=?",(pid,))
+    sync_queue(c, "PRODUCT_UPSERT", payload)
+    c.commit(); c.close()
     audit("PRODUCT_DISABLE", f"Producto #{pid}"); flash("Producto desactivado.","ok")
     return redirect(url_for("products"))
 

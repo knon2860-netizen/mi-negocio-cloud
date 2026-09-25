@@ -8,12 +8,25 @@
 <button>Agregar producto</button></form></div>
 <div class="card"><div class="toolbar"><input id="filter" placeholder="Buscar producto..." oninput="filterTable()"><span>{{products|length}} productos</span></div>
 <div class="tablewrap"><table id="ptable"><tr><th>Producto</th><th>Código</th><th>Categoría</th><th>Stock</th><th>Venta</th><th>Precio</th><th></th></tr>
-{% for p in products %}<tr><td><b>{{p.name}}</b></td><td>{{p.barcode or '-'}}</td><td>{{p.category or '-'}}</td><td class="{{'danger' if p.stock<0 else ('low' if p.stock<=p.min_stock else '')}}">{{p.stock}}{% if p.fractional %} kg{% endif %}</td><td>{% if p.fractional %}<span class="badge">Fraccionado</span>{% else %}Entero{% endif %}</td><td>$ {{p.sell_price|ars}}{% if p.fractional %} / kg{% endif %}</td><td><details><summary>Editar</summary><form method="post" action="/products/{{p.id}}/edit" class="formgrid compact">
-<input name="barcode" value="{{p.barcode or ''}}"><input name="name" value="{{p.name}}" required><input name="category" value="{{p.category or ''}}">
-<input name="buy_price" value="{{p.buy_price}}" type="number" step="0.01" min="0"><input name="sell_price" value="{{p.sell_price}}" type="number" step="0.01" min="0" required>
-<input name="min_stock" value="{{p.min_stock}}" type="number" step="0.001" min="0">
-<label class="checkline"><input name="fractional" type="checkbox" value="1" {% if p.fractional %}checked{% endif %}> Se vende fraccionado <small>Stock en kg; en ventas se puede ingresar kg o gramos.</small></label><button>Guardar</button></form>
-<form method="post" action="/products/{{p.id}}/delete" onsubmit="return confirm('¿Desactivar producto?')"><button class="danger small">Desactivar</button></form></details></td></tr>{% endfor %}
+{% for p in products %}<tr><td><b>{{p.name}}</b></td><td>{{p.barcode or '-'}}</td><td>{{p.category or '-'}}</td><td class="{{'danger' if p.stock<0 else ('low' if p.stock<=p.min_stock else '')}}">{{p.stock}}{% if p.fractional %} kg{% endif %}</td><td>{% if p.fractional %}<span class="badge">Fraccionado</span>{% else %}Entero{% endif %}</td><td>$ {{p.sell_price|ars}}{% if p.fractional %} / kg{% endif %}</td><td><details><summary>Editar producto</summary>
+<form method="post" action="/products/{{p.id}}/edit" class="formgrid compact">
+<div class="wide"><strong>Editar producto: {{p.name}}</strong></div>
+<label>Código de barras<input name="barcode" value="{{p.barcode or ''}}"></label>
+<label>Nombre<input name="name" value="{{p.name}}" required></label>
+<label>Categoría<input name="category" value="{{p.category or ''}}"></label>
+<label>Costo<input name="buy_price" value="{{p.buy_price}}" type="number" step="0.01" min="0"></label>
+<label>Precio de venta<input name="sell_price" value="{{p.sell_price}}" type="number" step="0.01" min="0" required></label>
+<label>Stock actual<input value="{{p.stock}}" type="number" step="0.001" readonly></label>
+<div class="wide" style="border:1px solid #b7d7c2;border-radius:10px;padding:12px;background:#f3fbf5">
+<strong>Modificar stock</strong><br>
+<small>Escribí una cantidad positiva para aumentar o negativa para descontar. Ejemplo: <b>5</b> suma 5; <b>-2</b> resta 2.</small>
+<label style="margin-top:8px">Cantidad a modificar<input name="stock_change" type="number" step="0.001" placeholder="Ej.: 5 o -2"></label>
+<small>El cambio queda registrado en el historial y la auditoría. Si no querés modificar el stock, dejá este casillero vacío.</small>
+</div>
+<label>Stock mínimo<input name="min_stock" value="{{p.min_stock}}" type="number" step="0.001" min="0"></label>
+<label class="checkline wide"><input name="fractional" type="checkbox" value="1" {% if p.fractional %}checked{% endif %}> Se vende fraccionado <small>Stock en kg; en ventas se puede ingresar kg o gramos.</small></label>
+<button>Guardar cambios</button></form>
+<form method="post" action="/products/{{p.id}}/delete" onsubmit="return confirm('¿Desactivar producto?')"><button class="danger small">Desactivar producto</button></form></details></td></tr>{% endfor %}
 </table></div></div>
 <script>function filterTable(){let q=document.getElementById('filter').value.toLowerCase();document.querySelectorAll('#ptable tr').forEach((r,i)=>{if(i)r.style.display=r.innerText.toLowerCase().includes(q)?'':'none'})}</script>
 {% endblock %}
