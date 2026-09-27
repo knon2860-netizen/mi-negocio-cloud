@@ -1,4 +1,4 @@
-import json, os
+import json, os, time, threading
 from datetime import datetime
 
 try:
@@ -11,6 +11,23 @@ from app import db
 SYNC_URL = os.environ.get("MI_NEGOCIO_SYNC_URL", "").strip().rstrip("/")
 SYNC_KEY = os.environ.get("MI_NEGOCIO_SYNC_KEY", "").strip()
 DEVICE_ID = (os.environ.get("MI_NEGOCIO_DEVICE_ID") or os.environ.get("MI_NEGOCIO_CLOUD_DEVICE_ID") or "ANDROID-WEB").strip() or "ANDROID-WEB"
+
+
+_SYNC_LOCK = threading.Lock()
+
+def request_retry(method, url, **kwargs):
+    """Reintenta ante 429/502/503, típicos cuando el servidor gratis de Render está despertando."""
+    last = None
+    for delay in (0, 3, 8, 15):
+        if delay: time.sleep(delay)
+        try:
+            rr = requests.request(method, url, **kwargs)
+            if rr.status_code not in (429, 502, 503): return rr
+            last = rr
+        except Exception as exc:
+            last = exc
+    if isinstance(last, Exception): raise last
+    return last
 
 
 def enabled():
@@ -50,7 +67,15 @@ def mark_bootstrapped(c):
 def sync_once():
     if not enabled():
         return {"ok": False, "configured": False, "message": "Servidor de sincronización no configurado."}
+    if not _SYNC_LOCK.acquire(blocking=False):
+        return {"ok": True, "configured": True, "message": "Ya hay una sincronización en curso.", "pending": pending_count()}
+    try:
+        return _sync_once_locked()
+    finally:
+        _SYNC_LOCK.release()
 
+
+def _sync_once_locked():
     c = db(); ensure_tables(c)
     rows = c.execute("SELECT * FROM sync_outbox WHERE synced=0 ORDER BY created_at, op_id LIMIT 100").fetchall()
     ops = [{"op_id": r["op_id"], "device_id": r["device_id"], "type": r["type"], "payload": json.loads(r["payload"]), "created_at": r["created_at"]} for r in rows]
@@ -59,13 +84,13 @@ def sync_once():
         headers = {"X-MiNegocio-Key": SYNC_KEY}
 
         if bootstrap_needed(c):
-            br = requests.post(SYNC_URL + "/v1/bootstrap", json={"source": "cloud", "device_id": DEVICE_ID, "snapshot": snapshot()}, headers=headers, timeout=15)
+            br = request_retry("POST", SYNC_URL + "/v1/bootstrap", json={"source": "cloud", "device_id": DEVICE_ID, "snapshot": snapshot()}, headers=headers, timeout=25)
             br.raise_for_status()
             mark_bootstrapped(c)
             c.commit()
 
         if ops:
-            r = requests.post(SYNC_URL + "/v1/push", json={"device_id": DEVICE_ID, "ops": ops}, headers=headers, timeout=15)
+            r = request_retry("POST", SYNC_URL + "/v1/push", json={"device_id": DEVICE_ID, "ops": ops}, headers=headers, timeout=25)
             r.raise_for_status()
             data = r.json()
             for oid in data.get("accepted", []):
@@ -79,22 +104,32 @@ def sync_once():
         row = c.execute("SELECT value FROM sync_state WHERE key='cursor'").fetchone()
         cur = int(row[0]) if row else 0
 
-        pr = requests.get(SYNC_URL + "/v1/pull", params={"after": cur, "device_id": DEVICE_ID}, headers=headers, timeout=15)
+        pr = request_retry("GET", SYNC_URL + "/v1/pull", params={"after": cur, "device_id": DEVICE_ID}, headers=headers, timeout=25)
         pr.raise_for_status()
         pdata = pr.json()
 
         # cloud_launcher exposes apply_op for the central PostgreSQL-backed app.
-        from cloud_launcher import apply_op
+        from cloud_launcher import apply_op, fix_sequences
         applied = 0
+        skipped = 0
         for op in pdata.get("ops", []):
-            if apply_op(c, op):
-                applied += 1
+            # SAVEPOINT por operación: en PostgreSQL un solo error aborta toda la transacción.
+            # Así una operación con conflicto se descarta sola y el resto sigue aplicándose.
+            c.execute("SAVEPOINT op_sp")
+            try:
+                if apply_op(c, op): applied += 1
+                c.execute("RELEASE SAVEPOINT op_sp")
+            except Exception:
+                skipped += 1
+                c.execute("ROLLBACK TO SAVEPOINT op_sp")
+                c.execute("RELEASE SAVEPOINT op_sp")
+        fix_sequences(c)
 
         next_cur = int(pdata.get("next_cursor", cur))
         c.execute("INSERT INTO sync_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ("cursor", str(next_cur)))
         c.execute("INSERT INTO sync_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ("last_sync", datetime.now().isoformat(timespec="seconds")))
         c.commit(); c.close()
-        return {"ok": True, "configured": True, "accepted": len(data.get("accepted", [])), "remote": len(pdata.get("ops", [])), "applied": applied, "pending": pending_count(), "message": "Sincronización realizada."}
+        return {"ok": True, "configured": True, "accepted": len(data.get("accepted", [])), "remote": len(pdata.get("ops", [])), "applied": applied, "skipped": skipped, "pending": pending_count(), "message": "Sincronización realizada." if not skipped else f"Sincronización realizada. Se omitieron {skipped} operación(es) con conflicto."}
     except Exception as e:
         c.rollback(); c.close()
         return {"ok": False, "configured": True, "message": str(e), "pending": len(ops)}

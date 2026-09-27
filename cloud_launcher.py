@@ -34,11 +34,7 @@ class PGCursor:
             self.cur.execute(sql,params or ())
             if low.startswith('insert into '):
                 m=re.search(r'insert\s+into\s+([a-z_]\w*)',raw,re.I)
-                if m:
-                    table=m.group(1)
-                    try:
-                        q=self.conn.pg.cursor(); q.execute("SELECT currval(pg_get_serial_sequence(%s,'id'))",(table,)); r=q.fetchone(); self.conn.last_id=r[0] if r else None; q.close()
-                    except Exception: self.conn.last_id=None
+                if m: self.conn.last_id=self.conn.lookup_last_id(m.group(1))
             return self
         except Exception as e:
             try:
@@ -60,6 +56,26 @@ class PGConn:
         from psycopg.rows import dict_row
         self.pg=psycopg.connect(url,row_factory=dict_row); self.last_id=None
     def execute(self,sql,params=None): return PGCursor(self).execute(sql,params)
+    def lookup_last_id(self,table):
+        """Último id generado para la tabla. Se hace dentro de un SAVEPOINT: en PostgreSQL,
+        si currval falla (pasa cuando el INSERT trajo un id explícito, como los que llegan
+        de la PC), la transacción entera queda abortada aunque Python atrape el error, y
+        todo lo que sigue falla con 'current transaction is aborted'."""
+        q=self.pg.cursor()
+        try:
+            q.execute("SAVEPOINT lastid_sp")
+            try:
+                q.execute("SELECT currval(pg_get_serial_sequence(%s,'id')) AS v",(table,))
+                r=q.fetchone()
+                q.execute("RELEASE SAVEPOINT lastid_sp")
+                if not r: return None
+                return r['v'] if isinstance(r,dict) else r[0]
+            except Exception:
+                q.execute("ROLLBACK TO SAVEPOINT lastid_sp")
+                q.execute("RELEASE SAVEPOINT lastid_sp")
+                return None
+        finally:
+            q.close()
     def executescript(self,script):
         s=re.sub(r'INTEGER PRIMARY KEY AUTOINCREMENT','BIGSERIAL PRIMARY KEY',script,flags=re.I)
         s=s.replace('REAL','DOUBLE PRECISION')
@@ -78,18 +94,6 @@ if DATABASE_URL: sqlite3.connect=connect_proxy
 from app import app, init_db
 init_db()
 
-# Mantiene sincronizada la base central con el servidor de sincronización cada 60 segundos.
-# No cambia el intervalo de Windows ni agrega otra frecuencia.
-import threading
-_sync_stop = threading.Event()
-def _cloud_sync_worker():
-    try:
-        from sync_client import worker_loop
-        worker_loop(_sync_stop, interval=60)
-    except Exception:
-        pass
-# threading.Thread(target=_cloud_sync_worker, daemon=True).start()
-
 VALID_OPS={'PRODUCT_UPSERT','CUSTOMER_UPSERT','SUPPLIER_UPSERT','SALE','PURCHASE','CUSTOMER_PAYMENT','CASH_MOVEMENT','STOCK_ADJUSTMENT','AUDIT'}
 def key_ok(req): return bool(SYNC_KEY) and req.headers.get('X-MiNegocio-Key','')==SYNC_KEY
 
@@ -99,15 +103,23 @@ def apply_op(c,op):
     if c.execute('SELECT 1 FROM applied_operations WHERE op_id=?',(oid,)).fetchone(): return False
     if typ=='PRODUCT_UPSERT':
         if not p.get('id'): return False
+        pid=int(p['id'])
         # Para un borrado/desactivación, Windows envía id + active=0.
         # No hace falta exigir el nombre para aplicar el borrado.
         if int(p.get('active', 1) or 0) == 0:
-            c.execute('UPDATE products SET active=0 WHERE id=?',(int(p['id']),))
+            c.execute('UPDATE products SET active=0 WHERE id=?',(pid,))
             if p.get('barcode'):
-                c.execute('UPDATE products SET active=0 WHERE barcode=?',(str(p.get('barcode')),))
+                c.execute('UPDATE products SET active=0 WHERE barcode=? AND id<>?',(str(p.get('barcode')),pid))
         else:
             if not p.get('name'): return False
-            c.execute('''INSERT INTO products(id,barcode,name,category,buy_price,sell_price,stock,min_stock,fractional,active) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET barcode=excluded.barcode,name=excluded.name,category=excluded.category,buy_price=excluded.buy_price,sell_price=excluded.sell_price,min_stock=excluded.min_stock,fractional=excluded.fractional,active=excluded.active''',tuple(p.get(x) for x in ['id','barcode','name','category','buy_price','sell_price','stock','min_stock','fractional','active']))
+            barcode=p.get('barcode') or None   # '' pasa a NULL: varios productos sin código no chocan
+            # El código de barras es único. Si acá ya hay OTRA fila con ese código (otro id),
+            # se libera antes de guardar, para no violar UNIQUE(barcode) y trabar la sincronización.
+            if barcode and not c.execute('SELECT 1 FROM products WHERE id=?',(pid,)).fetchone():
+                dup=c.execute('SELECT id FROM products WHERE barcode=?',(barcode,)).fetchone()
+                if dup and int(dup['id'])!=pid:
+                    c.execute('UPDATE products SET barcode=NULL WHERE id=?',(int(dup['id']),))
+            c.execute('''INSERT INTO products(id,barcode,name,category,buy_price,sell_price,stock,min_stock,fractional,active) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET barcode=excluded.barcode,name=excluded.name,category=excluded.category,buy_price=excluded.buy_price,sell_price=excluded.sell_price,min_stock=excluded.min_stock,fractional=excluded.fractional,active=excluded.active''',(pid,barcode)+tuple(p.get(x) for x in ['name','category','buy_price','sell_price','stock','min_stock','fractional','active']))
     elif typ=='CUSTOMER_UPSERT':
         if not p.get('id') or not p.get('name'): return False
         c.execute('''INSERT INTO customers(id,name,phone,address,balance,active) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,phone=excluded.phone,address=excluded.address,active=excluded.active''',tuple(p.get(x) for x in ['id','name','phone','address','balance','active']))
@@ -153,11 +165,27 @@ def apply_op(c,op):
     elif typ=='AUDIT': c.execute('INSERT INTO audit_log(user_id,action,detail,created_at) VALUES(?,?,?,?)',(int(p.get('user_id') or 1),str(p.get('action') or 'SYNC'),str(p.get('detail') or ''),p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
     c.execute('INSERT INTO applied_operations(op_id,applied_at) VALUES(?,?) ON CONFLICT(op_id) DO NOTHING',(oid,__import__('datetime').datetime.now().isoformat(timespec='seconds'))); return True
 
+SEQ_TABLES=('users','products','customers','suppliers','purchases','purchase_items','sales','sale_items','account_movements','cash_sessions','cash_movements','audit_log','stock_movements')
+def fix_sequences(c):
+    """Las filas que llegan de la PC traen id propio y no avanzan los contadores de PostgreSQL.
+    Se adelantan al máximo id existente para que un producto/venta creado en la nube no reciba
+    un id que ya existe (eso daba errores de 'ya existe')."""
+    if not DATABASE_URL: return
+    for t in SEQ_TABLES:
+        try:
+            c.execute("SAVEPOINT seqfix_sp")
+            c.execute(f"SELECT setval(pg_get_serial_sequence('{t}','id'), COALESCE((SELECT MAX(id) FROM {t}),1), (SELECT MAX(id) FROM {t}) IS NOT NULL)")
+            c.execute("RELEASE SAVEPOINT seqfix_sp")
+        except Exception:
+            try: c.execute("ROLLBACK TO SAVEPOINT seqfix_sp"); c.execute("RELEASE SAVEPOINT seqfix_sp")
+            except Exception: pass
+
 # Ensure central sync tables exist after app schema.
 conn=__import__('app').db()
 if DATABASE_URL:
     conn.execute('''CREATE TABLE IF NOT EXISTS operations(seq BIGSERIAL PRIMARY KEY,op_id TEXT UNIQUE NOT NULL,device_id TEXT NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL,received_at TEXT NOT NULL)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS applied_operations(op_id TEXT PRIMARY KEY,applied_at TEXT NOT NULL)''')
+fix_sequences(conn)
 conn.commit(); conn.close()
 
 from flask import request,jsonify
@@ -196,13 +224,12 @@ def bootstrap():
         c.execute('INSERT INTO metadata(key,value) VALUES(?,?)',('snapshot',json.dumps({'source':data.get('source',''),'device_id':data.get('device_id','')}))); c.commit(); c.close(); return jsonify(ok=True,created=True)
     except Exception: c.rollback(); c.close(); return jsonify(ok=False,error='server_database_error'),500
 
-# Sincronización automática entre la base web y el servidor central.
-# Se inicia después de cargar todas las rutas para evitar ciclos de importación.
+# Sincronización automática entre la base web y el servidor central (cada 60 s mientras el
+# servicio esté despierto). El botón "Sincronizar ahora" sigue funcionando igual.
 if os.environ.get("MI_NEGOCIO_SYNC_URL") and os.environ.get("MI_NEGOCIO_SYNC_KEY"):
     import threading
     from sync_client import worker_loop
     _sync_stop = threading.Event()
-    _sync_thread = threading.Thread(target=worker_loop, args=(_sync_stop, 60), daemon=True, name="mi-negocio-sync")
-    # _sync_thread.start()
+    threading.Thread(target=worker_loop, args=(_sync_stop, 60), daemon=True, name="mi-negocio-sync").start()
 
 if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.environ.get('PORT','8080')),debug=False)
