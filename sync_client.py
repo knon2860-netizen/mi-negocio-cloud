@@ -1,5 +1,5 @@
 import json, os, time, threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 try:
     import requests
@@ -104,6 +104,43 @@ def sync_once():
         _SYNC_LOCK.release()
 
 
+def _shared_mode(c):
+    """True si esta base de datos es la MISMA que usa el servidor central (la tabla operations ya
+    tiene datos). En ese caso la nube lee y escribe las operaciones directo en la base, sin pasar
+    por internet: no depende de que el servidor central esté despierto ni del error 429."""
+    if not os.environ.get("DATABASE_URL"): return False
+    try:
+        c.execute("SAVEPOINT shared_sp")
+        row = c.execute("SELECT COUNT(*) AS n FROM operations").fetchone()
+        c.execute("RELEASE SAVEPOINT shared_sp")
+        return bool(row) and int(row[0]) > 0
+    except Exception:
+        try:
+            c.execute("ROLLBACK TO SAVEPOINT shared_sp"); c.execute("RELEASE SAVEPOINT shared_sp")
+        except Exception:
+            pass
+        return False
+
+
+def _push_direct(c, ops):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    accepted = []
+    for o in ops:
+        c.execute("INSERT INTO operations(op_id,device_id,type,payload,created_at,received_at) VALUES(?,?,?,?,?,?) ON CONFLICT(op_id) DO NOTHING",
+                  (o["op_id"], o["device_id"], o["type"], json.dumps(o["payload"], ensure_ascii=False, separators=(",", ":")), str(o.get("created_at") or now), now))
+        accepted.append(o["op_id"])
+    return accepted
+
+
+def _pull_direct(c, cur):
+    rows = c.execute("SELECT seq,op_id,device_id,type,payload,created_at FROM operations WHERE seq>? ORDER BY seq LIMIT 500", (cur,)).fetchall()
+    ops = []
+    for r in rows:
+        if r[2] == DEVICE_ID: continue
+        ops.append({"seq": int(r[0]), "op_id": r[1], "device_id": r[2], "type": r[3], "payload": json.loads(r[4]), "created_at": r[5]})
+    return {"ok": True, "ops": ops, "next_cursor": int(rows[-1][0]) if rows else cur}
+
+
 def sync_async():
     """Para el botón: arranca la sincronización en segundo plano y responde enseguida
     (si tardara más de 30 s dentro del pedido web, gunicorn reiniciaría el servicio)."""
@@ -128,10 +165,16 @@ def _sync_once_locked():
         if bootstrap_needed(c):
             mark_bootstrapped(c); c.commit()
 
+        shared = _shared_mode(c)
+        if shared: _log("base compartida con el servidor central: se sincroniza directo en la base de datos")
+
         if ops:
-            r = request_retry("POST", SYNC_URL + "/v1/push", json={"device_id": DEVICE_ID, "ops": ops}, headers=headers, timeout=20)
-            _check(r, "push")
-            data = r.json()
+            if shared:
+                data = {"accepted": _push_direct(c, ops)}
+            else:
+                r = request_retry("POST", SYNC_URL + "/v1/push", json={"device_id": DEVICE_ID, "ops": ops}, headers=headers, timeout=20)
+                _check(r, "push")
+                data = r.json()
             for oid in data.get("accepted", []):
                 c.execute("UPDATE sync_outbox SET synced=1 WHERE op_id=?", (oid,))
             if data.get("rejected"):
@@ -143,10 +186,13 @@ def _sync_once_locked():
         row = c.execute("SELECT value FROM sync_state WHERE key='cursor'").fetchone()
         cur = int(row[0]) if row else 0
 
-        pr = request_retry("GET", SYNC_URL + "/v1/pull", params={"after": cur, "device_id": DEVICE_ID}, headers=headers, timeout=20)
-        _check(pr, "pull")
-        pdata = pr.json()
-        _log("traídas %d operaciones desde el servidor central (desde cursor %s)" % (len(pdata.get("ops", [])), cur))
+        if shared:
+            pdata = _pull_direct(c, cur)
+        else:
+            pr = request_retry("GET", SYNC_URL + "/v1/pull", params={"after": cur, "device_id": DEVICE_ID}, headers=headers, timeout=20)
+            _check(pr, "pull")
+            pdata = pr.json()
+        _log("traídas %d operaciones (desde cursor %s)" % (len(pdata.get("ops", [])), cur))
 
         # cloud_launcher exposes apply_op for the central PostgreSQL-backed app.
         from cloud_launcher import apply_op, fix_sequences
