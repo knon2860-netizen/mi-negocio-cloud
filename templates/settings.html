@@ -16,4 +16,12 @@
 </div></div>
 <div class="card"><h2>🖨️ Ticket</h2><p>Estos datos se guardan y aparecen automáticamente en los tickets. El logo de DonArturo se usa sin fondo blanco.</p><button class="big">Guardar configuración</button></div>
 </form>
+{% if session.role=='admin' %}
+<div class="card danger"><h2>⚠️ Borrar toda la información</h2>
+<p>Borra productos, ventas, clientes, proveedores, compras, caja y usuarios. No se puede deshacer. Después de borrar, iniciá sesión de nuevo con <b>admin / admin123</b>.</p>
+<form method="post" action="{{ url_for('reset_all_data') }}" onsubmit="return confirm('¿Seguro que querés borrar TODA la información? Esto no se puede deshacer.');">
+<label>Escribí <b>BORRAR TODO</b> para confirmar<input name="confirm" placeholder="BORRAR TODO" required></label>
+<button class="btn danger" type="submit">Borrar toda la información</button>
+</form></div>
+{% endif %}
 {% endblock %}
