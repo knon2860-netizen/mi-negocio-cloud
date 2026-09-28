@@ -1,5 +1,14 @@
 {% extends "base.html" %}{% block content %}
-<div class="pagehead"><div><h1>Venta #{{sale.id}}</h1><p class="muted">{{sale.created_at}} · {{sale.username}}</p></div><button class="btn" onclick="window.print()">🖨️ Imprimir</button></div>
+<div class="pagehead"><div><h1>Venta #{{sale.id}}{% if sale.status=='anulada' %} <span class="badge">ANULADA</span>{% endif %}</h1><p class="muted">{{sale.created_at}} · {{sale.username}}</p></div><button class="btn" onclick="window.print()">🖨️ Imprimir</button></div>
+{% if sale.status=='anulada' %}
+<div class="card danger"><b>Esta venta fue anulada</b>{% if sale.cancelled_at %} el {{sale.cancelled_at}}{% endif %}{% if cancelled_by_name %} por {{cancelled_by_name}}{% endif %}.{% if sale.cancel_reason %} Motivo: {{sale.cancel_reason}}{% endif %} El stock ya fue repuesto.</div>
+{% elif can_cancel %}
+<div class="card"><details><summary>Anular esta venta</summary>
+<form method="post" action="{{ url_for('cancel_sale', sid=sale.id) }}" onsubmit="return confirm('¿Anular la venta #{{sale.id}}? Se repone el stock y se revierte el pago. Esta acción no se puede deshacer.');">
+<label>Motivo (opcional)<input name="reason" maxlength="200" placeholder="Ej: error de carga, el cliente se arrepintió"></label>
+<button class="btn danger" type="submit">Anular venta</button>
+</form></details></div>
+{% endif %}
 <div class="ticket card">
 <div class="ticket-logo"><img src="{{ url_for('static', filename='logo.png') }}" alt="Logo"></div>
 <div class="ticket-company"><strong>{{company.company_name}}</strong>{% if company.cuit %}<div>CUIT: {{company.cuit}}</div>{% endif %}{% if company.address %}<div>Dirección: {{company.address}}</div>{% endif %}{% if company.phone %}<div>Tel.: {{company.phone}}</div>{% endif %}</div>
