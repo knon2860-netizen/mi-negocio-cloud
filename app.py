@@ -125,6 +125,18 @@ def init_db():
     if "fractional" not in pcols:
         c.execute("ALTER TABLE products ADD COLUMN fractional INTEGER DEFAULT 0")
 
+    # Migration: anulación de ventas.
+    scols = {r["name"] for r in c.execute("PRAGMA table_info(sales)").fetchall()}
+    if "status" not in scols:
+        c.execute("ALTER TABLE sales ADD COLUMN status TEXT DEFAULT 'valida'")
+        c.execute("UPDATE sales SET status='valida' WHERE status IS NULL")
+    if "cancelled_at" not in scols:
+        c.execute("ALTER TABLE sales ADD COLUMN cancelled_at TEXT")
+    if "cancelled_by" not in scols:
+        c.execute("ALTER TABLE sales ADD COLUMN cancelled_by INTEGER")
+    if "cancel_reason" not in scols:
+        c.execute("ALTER TABLE sales ADD COLUMN cancel_reason TEXT")
+
     # Lightweight migration for databases created by V1/V2.
     cols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
     if "created_at" not in cols:
@@ -278,13 +290,13 @@ def logout():
 def dashboard():
     c=db()
     t=date.today().isoformat()
-    sales_today=c.execute("SELECT COUNT(*) n,COALESCE(SUM(total),0) total FROM sales WHERE substr(created_at,1,10)=?",(t,)).fetchone()
+    sales_today=c.execute("SELECT COUNT(*) n,COALESCE(SUM(total),0) total FROM sales WHERE substr(created_at,1,10)=? AND status<>'anulada'",(t,)).fetchone()
     low=c.execute("SELECT COUNT(*) n FROM products WHERE active=1 AND stock<=min_stock").fetchone()["n"]
     negative=c.execute("SELECT COUNT(*) n FROM products WHERE active=1 AND stock<0").fetchone()["n"]
     debt=c.execute("SELECT COALESCE(SUM(balance),0) total FROM customers WHERE balance>0").fetchone()["total"]
     profit=c.execute("""SELECT COALESCE(SUM((si.unit_price-p.buy_price)*si.qty),0)
                        FROM sale_items si JOIN products p ON p.id=si.product_id
-                       JOIN sales s ON s.id=si.sale_id WHERE substr(s.created_at,1,10)=?""",(t,)).fetchone()[0]
+                       JOIN sales s ON s.id=si.sale_id WHERE substr(s.created_at,1,10)=? AND s.status<>'anulada'""",(t,)).fetchone()[0]
     cash=open_cash(c)
     c.close()
     return render_template("dashboard.html", sales_today=sales_today, low=low, negative=negative, debt=debt, profit=profit, cash=cash)
@@ -508,9 +520,9 @@ def new_sale():
                 if not cid: raise ValueError("Para fiado debe seleccionar un cliente.")
                 cust=c.execute("SELECT * FROM customers WHERE id=? AND active=1",(cid,)).fetchone()
                 if not cust: raise ValueError("Cliente inválido.")
-            cur=c.execute("""INSERT INTO sales(user_id,customer_id,cash_session_id,total,payment,created_at)
-                             VALUES(?,?,?,?,?,?)""",
-                          (session["user_id"],cid,cash["id"] if payment_type=="efectivo" and cash else None,total,payment_type,now()))
+            cur=c.execute("""INSERT INTO sales(user_id,customer_id,cash_session_id,total,payment,created_at,status)
+                             VALUES(?,?,?,?,?,?,?)""",
+                          (session["user_id"],cid,cash["id"] if payment_type=="efectivo" and cash else None,total,payment_type,now(),"valida"))
             sid=cur.lastrowid
             for p,qty,unit_price,subtotal in validated:
                 c.execute("""INSERT INTO sale_items(sale_id,product_id,qty,unit_price,subtotal)
@@ -553,9 +565,46 @@ def sale_detail(sid):
         c.close()
         flash("Venta inexistente.","error")
         return redirect(url_for("sales"))
+    cancelled_by_name=None
+    if s["cancelled_by"]:
+        u=c.execute("SELECT username FROM users WHERE id=?",(s["cancelled_by"],)).fetchone()
+        cancelled_by_name=u["username"] if u else None
     company=company_settings(c)
     c.close()
-    return render_template("sale_detail.html", sale=s, items=items, company=company)
+    return render_template("sale_detail.html", sale=s, items=items, company=company,
+                            cancelled_by_name=cancelled_by_name,
+                            can_cancel=(session.get("role")=="admin" and (s["status"] or "valida")!="anulada"))
+
+@app.post("/sale/<int:sid>/cancel")
+@login_required
+@admin_required
+def cancel_sale(sid):
+    c=db()
+    s=c.execute("SELECT * FROM sales WHERE id=?",(sid,)).fetchone()
+    if not s:
+        c.close(); flash("Venta inexistente.","error"); return redirect(url_for("sales"))
+    if (s["status"] or "valida")=="anulada":
+        c.close(); flash("Esa venta ya estaba anulada.","error"); return redirect(url_for("sale_detail", sid=sid))
+    reason=(request.form.get("reason") or "").strip()
+    items=c.execute("SELECT * FROM sale_items WHERE sale_id=?",(sid,)).fetchall()
+    for it in items:
+        c.execute("UPDATE products SET stock=stock+? WHERE id=?",(it["qty"],it["product_id"]))
+    note=f"Anulación de venta #{sid}"+(f": {reason}" if reason else "")
+    if s["payment"]=="fiado" and s["customer_id"]:
+        c.execute("UPDATE customers SET balance=balance-? WHERE id=?",(s["total"],s["customer_id"]))
+        c.execute("""INSERT INTO account_movements(customer_id,sale_id,type,amount,note,created_at)
+                     VALUES(?,?,?,?,?,?)""",(s["customer_id"],sid,"sale_cancel",-s["total"],note,now()))
+    elif s["payment"]=="efectivo":
+        cash=open_cash(c)
+        c.execute("""INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at)
+                     VALUES(?,?,?,?,?,?)""",(cash["id"] if cash else s["cash_session_id"],session["user_id"],"sale_cancel_cash",-s["total"],note,now()))
+    c.execute("UPDATE sales SET status='anulada', cancelled_at=?, cancelled_by=?, cancel_reason=? WHERE id=?",
+              (now(),session["user_id"],reason,sid))
+    sync_queue(c, "SALE_CANCEL", {"sale_id":sid,"cancelled_by":session["user_id"],"reason":reason,"created_at":now()})
+    c.commit(); c.close()
+    audit("SALE_CANCEL", note)
+    flash(f"Venta #{sid} anulada. Se repuso el stock.","ok")
+    return redirect(url_for("sale_detail", sid=sid))
 
 # Cash
 @app.route("/cash", methods=["GET","POST"])
@@ -570,7 +619,7 @@ def cash():
             flash("La caja ahora funciona automáticamente por día. No hace falta abrirla ni cerrarla.", "error")
         c.close(); return redirect(url_for("cash"))
     summary=c.execute("""SELECT
-      COALESCE(SUM(CASE WHEN type='sale_cash' THEN amount ELSE 0 END),0) sales_cash,
+      COALESCE(SUM(CASE WHEN type IN ('sale_cash','sale_cancel_cash') THEN amount ELSE 0 END),0) sales_cash,
       COALESCE(SUM(CASE WHEN type='debt_payment' THEN amount ELSE 0 END),0) debt_payments,
       COALESCE(SUM(CASE WHEN type='in' THEN amount ELSE 0 END),0) cash_in,
       COALESCE(SUM(CASE WHEN type='out' THEN amount ELSE 0 END),0) cash_out
@@ -813,10 +862,10 @@ def change_password():
 def statistics():
     c=db()
     t=request.args.get("date") or date.today().isoformat()
-    totals=c.execute("""SELECT COUNT(*) n,COALESCE(SUM(total),0) total FROM sales WHERE substr(created_at,1,10)=?""",(t,)).fetchone()
+    totals=c.execute("""SELECT COUNT(*) n,COALESCE(SUM(total),0) total FROM sales WHERE substr(created_at,1,10)=? AND status<>'anulada'""",(t,)).fetchone()
     cost=c.execute("""SELECT COALESCE(SUM(si.qty*p.buy_price),0) cost
                       FROM sale_items si JOIN products p ON p.id=si.product_id JOIN sales s ON s.id=si.sale_id
-                      WHERE substr(s.created_at,1,10)=?""",(t,)).fetchone()["cost"]
+                      WHERE substr(s.created_at,1,10)=? AND s.status<>'anulada'""",(t,)).fetchone()["cost"]
     profit=totals["total"]-cost
     markup=(profit/cost*100) if cost else 0
     margin=(profit/totals["total"]*100) if totals["total"] else 0
@@ -824,7 +873,7 @@ def statistics():
         COALESCE(SUM(CASE WHEN payment='efectivo' THEN total ELSE 0 END),0) cash,
         COALESCE(SUM(CASE WHEN payment='transferencia' THEN total ELSE 0 END),0) transfer,
         COALESCE(SUM(CASE WHEN payment='fiado' THEN total ELSE 0 END),0) credit
-        FROM sales WHERE substr(created_at,1,10)=?""",(t,)).fetchone()
+        FROM sales WHERE substr(created_at,1,10)=? AND status<>'anulada'""",(t,)).fetchone()
     cash_pct=(payments["cash"]/totals["total"]*100) if totals["total"] else 0
     transfer_pct=(payments["transfer"]/totals["total"]*100) if totals["total"] else 0
     credit_pct=(payments["credit"]/totals["total"]*100) if totals["total"] else 0
@@ -838,15 +887,15 @@ def statistics():
 def reports():
     c=db()
     t=request.args.get("date") or date.today().isoformat()
-    totals=c.execute("""SELECT COUNT(*) n,COALESCE(SUM(total),0) total FROM sales WHERE substr(created_at,1,10)=?""",(t,)).fetchone()
+    totals=c.execute("""SELECT COUNT(*) n,COALESCE(SUM(total),0) total FROM sales WHERE substr(created_at,1,10)=? AND status<>'anulada'""",(t,)).fetchone()
     cost=c.execute("""SELECT COALESCE(SUM(si.qty*p.buy_price),0) cost
                       FROM sale_items si JOIN products p ON p.id=si.product_id JOIN sales s ON s.id=si.sale_id
-                      WHERE substr(s.created_at,1,10)=?""",(t,)).fetchone()["cost"]
+                      WHERE substr(s.created_at,1,10)=? AND s.status<>'anulada'""",(t,)).fetchone()["cost"]
     payment_rows=c.execute("""SELECT payment,COUNT(*) n,COALESCE(SUM(total),0) total
-                              FROM sales WHERE substr(created_at,1,10)=? GROUP BY payment""",(t,)).fetchall()
+                              FROM sales WHERE substr(created_at,1,10)=? AND status<>'anulada' GROUP BY payment""",(t,)).fetchall()
     top=c.execute("""SELECT p.name,SUM(si.qty) qty,SUM(si.subtotal) total
                      FROM sale_items si JOIN products p ON p.id=si.product_id
-                     JOIN sales s ON s.id=si.sale_id WHERE substr(s.created_at,1,10)=?
+                     JOIN sales s ON s.id=si.sale_id WHERE substr(s.created_at,1,10)=? AND s.status<>'anulada'
                      GROUP BY p.id ORDER BY qty DESC LIMIT 15""",(t,)).fetchall()
     c.close()
     return render_template("reports.html", day=t, totals=totals, cost=cost, profit=totals["total"]-cost, payments=payment_rows, top=top)

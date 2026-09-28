@@ -94,7 +94,7 @@ if DATABASE_URL: sqlite3.connect=connect_proxy
 from app import app, init_db
 init_db()
 
-VALID_OPS={'PRODUCT_UPSERT','CUSTOMER_UPSERT','SUPPLIER_UPSERT','SALE','PURCHASE','CUSTOMER_PAYMENT','CASH_MOVEMENT','STOCK_ADJUSTMENT','AUDIT'}
+VALID_OPS={'PRODUCT_UPSERT','CUSTOMER_UPSERT','SUPPLIER_UPSERT','SALE','SALE_CANCEL','PURCHASE','CUSTOMER_PAYMENT','CASH_MOVEMENT','STOCK_ADJUSTMENT','AUDIT'}
 def key_ok(req): return bool(SYNC_KEY) and req.headers.get('X-MiNegocio-Key','')==SYNC_KEY
 
 def apply_op(c,op):
@@ -141,6 +141,29 @@ def apply_op(c,op):
         if pay=='fiado' and cid:
             total=float(p.get('total') or 0); c.execute('UPDATE customers SET balance=balance+? WHERE id=?',(total,cid)); c.execute('INSERT INTO account_movements(customer_id,sale_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',(cid,sid,'sale',total,f'Venta fiada #{sid}',p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
         if pay=='efectivo' and cash: c.execute('INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',(cash['id'],uid,'sale_cash',float(p.get('total') or 0),f'Venta #{sid} sincronizada',p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
+    elif typ=='SALE_CANCEL':
+        sid=int(p.get('sale_id') or 0)
+        if not sid: return False
+        s=c.execute('SELECT * FROM sales WHERE id=?',(sid,)).fetchone()
+        if not s: return False   # la venta todavía no llegó; se reintenta en otra vuelta
+        if (s['status'] or 'valida')=='anulada': return False
+        import datetime as _dt
+        reason=str(p.get('reason') or '')
+        for it in c.execute('SELECT * FROM sale_items WHERE sale_id=?',(sid,)).fetchall():
+            c.execute('UPDATE products SET stock=stock+? WHERE id=?',(it['qty'],it['product_id']))
+        note=f"Anulación de venta #{sid} (sincronizada)"+(f": {reason}" if reason else "")
+        if s['payment']=='fiado' and s['customer_id']:
+            c.execute('UPDATE customers SET balance=balance-? WHERE id=?',(s['total'],s['customer_id']))
+            c.execute('INSERT INTO account_movements(customer_id,sale_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',
+                      (s['customer_id'],sid,'sale_cancel',-s['total'],note,_dt.datetime.now().isoformat(timespec='seconds')))
+        elif s['payment']=='efectivo':
+            row=c.execute("SELECT id FROM cash_sessions WHERE status='open' ORDER BY id DESC LIMIT 1").fetchone()
+            cash_id=row['id'] if row else s['cash_session_id']
+            uid=int(p.get('cancelled_by') or 1)
+            c.execute('INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',
+                      (cash_id,uid,'sale_cancel_cash',-s['total'],note,_dt.datetime.now().isoformat(timespec='seconds')))
+        c.execute("UPDATE sales SET status='anulada', cancelled_at=?, cancelled_by=?, cancel_reason=? WHERE id=?",
+                  (p.get('created_at') or _dt.datetime.now().isoformat(timespec='seconds'),p.get('cancelled_by'),reason,sid))
     elif typ=='PURCHASE':
         pid=int(p.get('purchase_id') or 0); items=p.get('items') or []
         if not pid or c.execute('SELECT 1 FROM purchases WHERE id=?',(pid,)).fetchone(): return False
