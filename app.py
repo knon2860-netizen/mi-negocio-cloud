@@ -943,6 +943,37 @@ def audit_page():
                       LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT 500""").fetchall()
     c.close(); return render_template("audit.html", logs=rows)
 
+
+RESET_TABLES=("sale_items","sales","purchase_items","purchases","account_movements",
+              "cash_movements","cash_sessions","stock_movements","audit_log",
+              "customers","suppliers","products","users")
+
+@app.post("/admin/reset-all-data")
+@login_required
+@admin_required
+def reset_all_data():
+    if (request.form.get("confirm") or "").strip().upper() != "BORRAR TODO":
+        flash("Para borrar todo, escribí exactamente: BORRAR TODO", "error")
+        return redirect(url_for("settings"))
+    c=db()
+    for t in RESET_TABLES:
+        c.execute(f"DELETE FROM {t}")
+    for t in ("sync_outbox","sync_state","sync_applied","applied_operations","operations"):
+        try: c.execute(f"DELETE FROM {t}")
+        except Exception: pass
+    try: c.execute("DELETE FROM sqlite_sequence")
+    except Exception: pass
+    c.commit(); c.close()
+    init_db()   # recrea admin/empleado y ajustes por defecto
+    try:
+        from cloud_launcher import fix_sequences   # solo existe en la nube (Postgres)
+        c2=db(); fix_sequences(c2); c2.commit(); c2.close()
+    except ImportError:
+        pass
+    session.clear()
+    flash("Se borró toda la información. Iniciá sesión con admin / admin123.", "ok")
+    return redirect(url_for("login"))
+
 @app.route("/settings", methods=["GET","POST"])
 @login_required
 @admin_required
