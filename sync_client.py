@@ -29,19 +29,30 @@ def _save_result(text):
         _log("no se pudo guardar el resultado: %r" % (e,))
 
 def request_retry(method, url, **kwargs):
-    """Reintenta ante 429/502/503, típicos cuando el servidor gratis de Render está despertando."""
+    """Reintenta ante 429/502/503, típicos cuando el servidor gratis de Render está despertando
+    o cuando el borde de Render limita pedidos. Deja en el log quién respondió, para diagnosticar."""
     last = None
-    for delay in (0, 3, 8):
+    for delay in (0, 4, 10):
         if delay: time.sleep(delay)
         try:
             rr = requests.request(method, url, **kwargs)
             if rr.status_code not in (429, 502, 503): return rr
             last = rr
+            _log("respuesta %s de %s (Server=%s, Retry-After=%s) cuerpo: %r" % (
+                rr.status_code, url, rr.headers.get("Server"), rr.headers.get("Retry-After"), (rr.text or "")[:120]))
+            ra = rr.headers.get("Retry-After")
+            if ra and ra.isdigit() and int(ra) <= 15: time.sleep(int(ra))
         except Exception as exc:
             last = exc
+            _log("fallo de red hacia %s: %r" % (url, exc))
     if isinstance(last, Exception): raise last
     return last
 
+def _check(rr, what):
+    """Como raise_for_status pero con un mensaje entendible."""
+    if rr.status_code >= 400:
+        raise Exception("El servidor central respondió %s en '%s' (Server=%s): %s" % (
+            rr.status_code, what, rr.headers.get("Server"), (rr.text or "")[:100].replace("\n", " ")))
 
 def enabled():
     return bool(requests and SYNC_URL and SYNC_KEY)
@@ -93,6 +104,17 @@ def sync_once():
         _SYNC_LOCK.release()
 
 
+def sync_async():
+    """Para el botón: arranca la sincronización en segundo plano y responde enseguida
+    (si tardara más de 30 s dentro del pedido web, gunicorn reiniciaría el servicio)."""
+    if not enabled():
+        return False, "Servidor de sincronización no configurado."
+    if _SYNC_LOCK.locked():
+        return False, "Ya hay una sincronización en curso. Esperá un momento y recargá esta pantalla."
+    threading.Thread(target=sync_once, daemon=True, name="mi-negocio-sync-manual").start()
+    return True, "Sincronización iniciada. Recargá esta pantalla en unos segundos para ver el resultado."
+
+
 def _sync_once_locked():
     c = db(); ensure_tables(c)
     rows = c.execute("SELECT * FROM sync_outbox WHERE synced=0 ORDER BY created_at, op_id LIMIT 100").fetchall()
@@ -101,15 +123,14 @@ def _sync_once_locked():
     try:
         headers = {"X-MiNegocio-Key": SYNC_KEY}
 
+        # La nube no necesita publicar una copia inicial en el servidor central: la publica la PC
+        # y la nube nunca la descarga. Enviarla era un pedido pesado que además recibía 429.
         if bootstrap_needed(c):
-            br = request_retry("POST", SYNC_URL + "/v1/bootstrap", json={"source": "cloud", "device_id": DEVICE_ID, "snapshot": snapshot()}, headers=headers, timeout=20)
-            br.raise_for_status()
-            mark_bootstrapped(c)
-            c.commit()
+            mark_bootstrapped(c); c.commit()
 
         if ops:
             r = request_retry("POST", SYNC_URL + "/v1/push", json={"device_id": DEVICE_ID, "ops": ops}, headers=headers, timeout=20)
-            r.raise_for_status()
+            _check(r, "push")
             data = r.json()
             for oid in data.get("accepted", []):
                 c.execute("UPDATE sync_outbox SET synced=1 WHERE op_id=?", (oid,))
@@ -123,7 +144,7 @@ def _sync_once_locked():
         cur = int(row[0]) if row else 0
 
         pr = request_retry("GET", SYNC_URL + "/v1/pull", params={"after": cur, "device_id": DEVICE_ID}, headers=headers, timeout=20)
-        pr.raise_for_status()
+        _check(pr, "pull")
         pdata = pr.json()
         _log("traídas %d operaciones desde el servidor central (desde cursor %s)" % (len(pdata.get("ops", [])), cur))
 

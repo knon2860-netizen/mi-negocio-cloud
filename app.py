@@ -924,9 +924,9 @@ def settings():
 def sync_page():
     if request.method=="POST":
         try:
-            from sync_client import sync_once
-            result=sync_once()
-            flash(result.get("message","Sincronización terminada."), "ok" if result.get("ok") else "error")
+            from sync_client import sync_async
+            started,msg=sync_async()
+            flash(msg, "ok" if started else "error")
         except Exception as e:
             flash("No se pudo sincronizar: "+str(e), "error")
         return redirect(url_for("sync_page"))
