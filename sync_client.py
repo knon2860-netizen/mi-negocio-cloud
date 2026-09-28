@@ -15,10 +15,23 @@ DEVICE_ID = (os.environ.get("MI_NEGOCIO_DEVICE_ID") or os.environ.get("MI_NEGOCI
 
 _SYNC_LOCK = threading.Lock()
 
+def _log(msg):
+    print("[sync] " + str(msg), flush=True)   # aparece en Render -> Logs
+
+def _save_result(text):
+    """Guarda el resultado del último intento para mostrarlo en la pantalla Sincronización."""
+    try:
+        c = db(); ensure_tables(c)
+        c.execute("INSERT INTO sync_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                  ("last_result", datetime.now().strftime("%d/%m %H:%M:%S") + " · " + str(text)[:300]))
+        c.commit(); c.close()
+    except Exception as e:
+        _log("no se pudo guardar el resultado: %r" % (e,))
+
 def request_retry(method, url, **kwargs):
     """Reintenta ante 429/502/503, típicos cuando el servidor gratis de Render está despertando."""
     last = None
-    for delay in (0, 3, 8, 15):
+    for delay in (0, 3, 8):
         if delay: time.sleep(delay)
         try:
             rr = requests.request(method, url, **kwargs)
@@ -70,7 +83,12 @@ def sync_once():
     if not _SYNC_LOCK.acquire(blocking=False):
         return {"ok": True, "configured": True, "message": "Ya hay una sincronización en curso.", "pending": pending_count()}
     try:
-        return _sync_once_locked()
+        _log("inicio de sincronización")
+        result = _sync_once_locked()
+        _log("fin: ok=%s · %s" % (result.get("ok"), result.get("message")))
+        _save_result(("OK" if result.get("ok") else "ERROR") + " — " + str(result.get("message")) +
+                     (" (traídas %s, aplicadas %s, omitidas %s)" % (result.get("remote"), result.get("applied"), result.get("skipped")) if result.get("ok") else ""))
+        return result
     finally:
         _SYNC_LOCK.release()
 
@@ -84,13 +102,13 @@ def _sync_once_locked():
         headers = {"X-MiNegocio-Key": SYNC_KEY}
 
         if bootstrap_needed(c):
-            br = request_retry("POST", SYNC_URL + "/v1/bootstrap", json={"source": "cloud", "device_id": DEVICE_ID, "snapshot": snapshot()}, headers=headers, timeout=25)
+            br = request_retry("POST", SYNC_URL + "/v1/bootstrap", json={"source": "cloud", "device_id": DEVICE_ID, "snapshot": snapshot()}, headers=headers, timeout=20)
             br.raise_for_status()
             mark_bootstrapped(c)
             c.commit()
 
         if ops:
-            r = request_retry("POST", SYNC_URL + "/v1/push", json={"device_id": DEVICE_ID, "ops": ops}, headers=headers, timeout=25)
+            r = request_retry("POST", SYNC_URL + "/v1/push", json={"device_id": DEVICE_ID, "ops": ops}, headers=headers, timeout=20)
             r.raise_for_status()
             data = r.json()
             for oid in data.get("accepted", []):
@@ -104,9 +122,10 @@ def _sync_once_locked():
         row = c.execute("SELECT value FROM sync_state WHERE key='cursor'").fetchone()
         cur = int(row[0]) if row else 0
 
-        pr = request_retry("GET", SYNC_URL + "/v1/pull", params={"after": cur, "device_id": DEVICE_ID}, headers=headers, timeout=25)
+        pr = request_retry("GET", SYNC_URL + "/v1/pull", params={"after": cur, "device_id": DEVICE_ID}, headers=headers, timeout=20)
         pr.raise_for_status()
         pdata = pr.json()
+        _log("traídas %d operaciones desde el servidor central (desde cursor %s)" % (len(pdata.get("ops", [])), cur))
 
         # cloud_launcher exposes apply_op for the central PostgreSQL-backed app.
         from cloud_launcher import apply_op, fix_sequences
@@ -119,8 +138,9 @@ def _sync_once_locked():
             try:
                 if apply_op(c, op): applied += 1
                 c.execute("RELEASE SAVEPOINT op_sp")
-            except Exception:
+            except Exception as e:
                 skipped += 1
+                _log("operación omitida %s (%s): %r" % (op.get("op_id"), op.get("type"), str(e)[:200]))
                 c.execute("ROLLBACK TO SAVEPOINT op_sp")
                 c.execute("RELEASE SAVEPOINT op_sp")
         fix_sequences(c)
@@ -131,14 +151,17 @@ def _sync_once_locked():
         c.commit(); c.close()
         return {"ok": True, "configured": True, "accepted": len(data.get("accepted", [])), "remote": len(pdata.get("ops", [])), "applied": applied, "skipped": skipped, "pending": pending_count(), "message": "Sincronización realizada." if not skipped else f"Sincronización realizada. Se omitieron {skipped} operación(es) con conflicto."}
     except Exception as e:
-        c.rollback(); c.close()
+        import traceback; _log("ERROR: " + traceback.format_exc()[-800:])
+        try: c.rollback(); c.close()
+        except Exception: pass
         return {"ok": False, "configured": True, "message": str(e), "pending": len(ops)}
 
 
 def worker_loop(stop_event, interval=60):
+    _log("hilo de sincronización automática iniciado (cada %s s)" % interval)
     while not stop_event.is_set():
         try:
             sync_once()
-        except Exception:
-            pass
+        except Exception as e:
+            _log("error inesperado en el hilo: %r" % (e,))
         stop_event.wait(interval)

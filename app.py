@@ -162,7 +162,10 @@ def sync_status_data():
     try:
         c=db(); n=c.execute("SELECT COUNT(*) FROM sync_outbox WHERE synced=0").fetchone()[0]
         last=c.execute("SELECT value FROM sync_state WHERE key='last_sync'").fetchone()
-        c.close(); return n, (last[0] if last else "Nunca")
+        res=c.execute("SELECT value FROM sync_state WHERE key='last_result'").fetchone()
+        c.close(); txt=(last[0] if last else "Nunca")
+        if res: txt += "  |  Último intento: " + res[0]
+        return n, txt
     except Exception:
         return 0, "Nunca"
 
