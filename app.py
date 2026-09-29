@@ -973,14 +973,30 @@ def reset_all_data():
         despues=c.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
         print(f"[reset] {t}: tenía {antes} filas, quedaron {despues}", flush=True)
     for t in ("sync_outbox","sync_state","sync_applied","applied_operations","operations"):
+        # SAVEPOINT: en PostgreSQL, si una tabla no existe acá (algunas son solo de la PC),
+        # ese error deja toda la transacción inválida y el commit final terminaría
+        # deshaciendo TODO lo borrado antes. Aislamos cada tabla para que eso no pase.
         try:
+            c.execute("SAVEPOINT reset_sp")
             antes=c.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
             c.execute(f"DELETE FROM {t}")
+            c.execute("RELEASE SAVEPOINT reset_sp")
             print(f"[reset] {t}: tenía {antes} filas (sync)", flush=True)
         except Exception as e:
+            try:
+                c.execute("ROLLBACK TO SAVEPOINT reset_sp"); c.execute("RELEASE SAVEPOINT reset_sp")
+            except Exception:
+                pass
             print(f"[reset] {t}: no existe o falló ({e!r})", flush=True)
-    try: c.execute("DELETE FROM sqlite_sequence")
-    except Exception: pass
+    try:
+        c.execute("SAVEPOINT reset_sp2")
+        c.execute("DELETE FROM sqlite_sequence")
+        c.execute("RELEASE SAVEPOINT reset_sp2")
+    except Exception:
+        try:
+            c.execute("ROLLBACK TO SAVEPOINT reset_sp2"); c.execute("RELEASE SAVEPOINT reset_sp2")
+        except Exception:
+            pass
     c.commit(); c.close()
     chequeo=db(); n_chequeo=chequeo.execute("SELECT COUNT(*) n FROM products").fetchone()["n"]; chequeo.close()
     print(f"[reset] verificación con conexión NUEVA: products tiene {n_chequeo} filas", flush=True)
