@@ -14,6 +14,16 @@ else:
     RESOURCE_DIR = APP_DIR
 DB = os.environ.get("MI_NEGOCIO_DB", os.path.join(APP_DIR, "mi_negocio.db"))
 app = Flask(__name__, template_folder=os.path.join(RESOURCE_DIR, "templates"), static_folder=os.path.join(RESOURCE_DIR, "static"))
+
+@app.after_request
+def _no_cache(resp):
+    # El celular (app o Chrome) puede guardar una copia vieja de páginas como Stock o
+    # Ventas y no volver a pedirlas al servidor. Esto obliga a que siempre traiga la
+    # versión actual, salvo para archivos estáticos (que no cambian).
+    if not request.path.startswith("/static/"):
+        resp.headers["Cache-Control"]="no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"]="no-cache"
+    return resp
 app.secret_key = os.environ.get("MI_NEGOCIO_SECRET", secrets.token_hex(32))
 app.permanent_session_lifetime = __import__("datetime").timedelta(days=3650)
 app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
