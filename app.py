@@ -952,7 +952,9 @@ RESET_TABLES=("sale_items","sales","purchase_items","purchases","account_movemen
 @login_required
 @admin_required
 def reset_all_data():
-    if (request.form.get("confirm") or "").strip().upper() != "BORRAR TODO":
+    import re as _re
+    _norm=_re.sub(r"[^A-ZÁÉÍÓÚÑ]+"," ",(request.form.get("confirm") or "").strip().upper()).strip()
+    if _norm != "BORRAR TODO":
         flash("Para borrar todo, escribí exactamente: BORRAR TODO", "error")
         return redirect(url_for("settings"))
     c=db()
