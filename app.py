@@ -968,7 +968,7 @@ def reset_all_data():
     c=db()
     for t in RESET_TABLES:
         c.execute(f"DELETE FROM {t}")
-    for t in ("sync_outbox","sync_state","sync_applied","applied_operations","operations"):
+    for t in ("sync_outbox","sync_state","sync_applied","applied_operations","operations","metadata"):
         try: c.execute(f"DELETE FROM {t}")
         except Exception: pass
     try: c.execute("DELETE FROM sqlite_sequence")
