@@ -94,7 +94,7 @@ if DATABASE_URL: sqlite3.connect=connect_proxy
 from app import app, init_db
 init_db()
 
-VALID_OPS={'PRODUCT_UPSERT','CUSTOMER_UPSERT','SUPPLIER_UPSERT','SALE','SALE_CANCEL','PURCHASE','CUSTOMER_PAYMENT','CASH_MOVEMENT','STOCK_ADJUSTMENT','AUDIT'}
+VALID_OPS={'PRODUCT_UPSERT','CUSTOMER_UPSERT','SUPPLIER_UPSERT','SALE','SALE_CANCEL','PURCHASE','CUSTOMER_PAYMENT','CASH_MOVEMENT','STOCK_ADJUSTMENT','AUDIT','USER_UPSERT','USER_DELETE'}
 def key_ok(req): return bool(SYNC_KEY) and req.headers.get('X-MiNegocio-Key','')==SYNC_KEY
 
 def apply_op(c,op):
@@ -164,6 +164,21 @@ def apply_op(c,op):
                       (cash_id,uid,'sale_cancel_cash',-s['total'],note,_dt.datetime.now().isoformat(timespec='seconds')))
         c.execute("UPDATE sales SET status='anulada', cancelled_at=?, cancelled_by=?, cancel_reason=? WHERE id=?",
                   (p.get('created_at') or _dt.datetime.now().isoformat(timespec='seconds'),p.get('cancelled_by'),reason,sid))
+    elif typ=='USER_UPSERT':
+        uid=int(p.get('id') or 0)
+        if not uid or not p.get('username'): return False
+        import datetime as _dt
+        try:
+            c.execute('''INSERT INTO users(id,username,password,role,active,created_at) VALUES(?,?,?,?,?,?)
+                         ON CONFLICT(id) DO UPDATE SET username=excluded.username,password=excluded.password,role=excluded.role,active=excluded.active''',
+                      (uid,p.get('username'),p.get('password'),p.get('role','employee'),int(p.get('active',1) or 0),
+                       p.get('created_at') or _dt.datetime.now().isoformat(timespec='seconds')))
+        except Exception:
+            return False   # username ya usado por otro id acá; se resuelve a mano si pasa
+    elif typ=='USER_DELETE':
+        uid=int(p.get('id') or 0)
+        if not uid: return False
+        c.execute("DELETE FROM users WHERE id=? AND role='employee'",(uid,))
     elif typ=='PURCHASE':
         pid=int(p.get('purchase_id') or 0); items=p.get('items') or []
         if not pid or c.execute('SELECT 1 FROM purchases WHERE id=?',(pid,)).fetchone(): return False

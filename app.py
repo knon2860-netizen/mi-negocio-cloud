@@ -775,8 +775,10 @@ def employees():
     if request.method=="POST":
         d=request.form
         try:
-            c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
+            cur=c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
                       (d["username"].strip(),generate_password_hash(d["password"]),"employee",1,now()))
+            row=c.execute("SELECT * FROM users WHERE id=?",(cur.lastrowid,)).fetchone()
+            sync_queue(c,"USER_UPSERT",dict(row))
             c.commit(); audit("EMPLOYEE_CREATE",d["username"].strip()); flash("Empleado creado.","ok")
         except sqlite3.IntegrityError: c.rollback(); flash("Ese usuario ya existe.","error")
     rows=c.execute("SELECT id,username,role,active,created_at FROM users ORDER BY role,username").fetchall()
@@ -787,7 +789,10 @@ def employees():
 @admin_required
 def toggle_employee(uid):
     if uid==session["user_id"]: flash("No podés desactivar tu propio usuario.","error"); return redirect(url_for("employees"))
-    c=db(); c.execute("UPDATE users SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=? AND role='employee'",(uid,)); c.commit(); c.close()
+    c=db(); c.execute("UPDATE users SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=? AND role='employee'",(uid,))
+    row=c.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
+    if row: sync_queue(c,"USER_UPSERT",dict(row))
+    c.commit(); c.close()
     audit("EMPLOYEE_TOGGLE",f"Usuario #{uid}"); flash("Estado del empleado actualizado.","ok"); return redirect(url_for("employees"))
 
 @app.post("/employees/<int:uid>/delete")
@@ -812,7 +817,9 @@ def delete_employee(uid):
         flash("No se puede borrar definitivamente a este empleado porque tiene historial de " + ", ".join(refs) + ". Podés desactivarlo para que no pueda volver a ingresar.","error")
         return redirect(url_for("employees"))
     username=emp["username"]
-    c.execute("DELETE FROM users WHERE id=? AND role='employee'",(uid,)); c.commit(); c.close()
+    c.execute("DELETE FROM users WHERE id=? AND role='employee'",(uid,))
+    sync_queue(c,"USER_DELETE",{"id":uid})
+    c.commit(); c.close()
     audit("EMPLOYEE_DELETE",f"Usuario #{uid} ({username})")
     flash("Empleado eliminado.","ok")
     return redirect(url_for("employees"))
@@ -840,6 +847,8 @@ def my_user():
                 password_hash=generate_password_hash(new_password) if new_password else u["password"]
                 c.execute("UPDATE users SET username=?, password=? WHERE id=? AND role='admin'",
                           (username,password_hash,u["id"]))
+                row=c.execute("SELECT * FROM users WHERE id=?",(u["id"],)).fetchone()
+                sync_queue(c,"USER_UPSERT",dict(row))
                 c.commit()
                 session["username"]=username
                 audit("ADMIN_PROFILE_CHANGE", f"Usuario administrador actualizado: {username}")
