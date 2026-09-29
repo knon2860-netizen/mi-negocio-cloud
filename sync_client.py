@@ -104,23 +104,12 @@ def sync_once():
         _SYNC_LOCK.release()
 
 
-def _shared_mode(c):
-    """True si esta base de datos es la MISMA que usa el servidor central (la tabla operations ya
-    tiene datos). En ese caso la nube lee y escribe las operaciones directo en la base, sin pasar
-    por internet: no depende de que el servidor central esté despierto ni del error 429."""
-    if not os.environ.get("DATABASE_URL"): return False
-    try:
-        c.execute("SAVEPOINT shared_sp")
-        row = c.execute("SELECT COUNT(*) AS n FROM operations").fetchone()
-        c.execute("RELEASE SAVEPOINT shared_sp")
-        return bool(row) and int(row[0]) > 0
-    except Exception:
-        try:
-            c.execute("ROLLBACK TO SAVEPOINT shared_sp"); c.execute("RELEASE SAVEPOINT shared_sp")
-        except Exception:
-            pass
-        return False
-
+def _shared_mode():
+    """
+    Si existe DATABASE_URL, esta instancia usa la base central.
+    No depende de que la tabla operations tenga registros.
+    """
+    return bool(os.environ.get("DATABASE_URL"))
 
 def _push_direct(c, ops):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
