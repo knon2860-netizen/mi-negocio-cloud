@@ -982,6 +982,14 @@ def reset_all_data():
         despues=c.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
         print(f"[reset] {t}: tenía {antes} filas, quedaron {despues}", flush=True)
     for t in ("sync_outbox","sync_state","sync_applied","applied_operations","operations"):
+        if t in ("sync_state","applied_operations","operations") and not os.environ.get("DATABASE_URL"):
+            # En la PC (base local, no la nube compartida) NO se toca el cursor de
+            # sincronización: si se reiniciara acá, la próxima sincronización volvería a
+            # descargar TODO el historial viejo del servidor central y "resucitaría" datos
+            # que se acaban de borrar. Solo la nube (que comparte la base con el servidor
+            # central) puede reiniciar esto de forma segura.
+            print(f"[reset] {t}: se deja sin tocar (es de la PC, no de la nube)", flush=True)
+            continue
         # SAVEPOINT: en PostgreSQL, si una tabla no existe acá (algunas son solo de la PC),
         # ese error deja toda la transacción inválida y el commit final terminaría
         # deshaciendo TODO lo borrado antes. Aislamos cada tabla para que eso no pase.
