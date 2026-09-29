@@ -104,7 +104,7 @@ def sync_once():
         _SYNC_LOCK.release()
 
 
-def _shared_mode():
+def _shared_mode(c):
     """
     Si existe DATABASE_URL, esta instancia usa la base central.
     No depende de que la tabla operations tenga registros.
