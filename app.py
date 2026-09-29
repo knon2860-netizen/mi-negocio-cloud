@@ -962,7 +962,7 @@ RESET_TABLES=("sale_items","sales","purchase_items","purchases","account_movemen
 @login_required
 @admin_required
 def reset_all_data():
-if request.form.get("confirm","").strip().upper() not in ("SI","BORRAR TODO"):
+if request.form.get("confirm") != "SI":   
     flash("Tenés que tildar la casilla de confirmación para borrar todo.", "error")
         return redirect(url_for("settings"))
     c=db()
