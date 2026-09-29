@@ -962,18 +962,28 @@ RESET_TABLES=("sale_items","sales","purchase_items","purchases","account_movemen
 @login_required
 @admin_required
 def reset_all_data():
-    if request.form.get("confirm","").strip().upper() not in ("SI","BORRAR TODO"):
+    if request.form.get("confirm") != "SI":
         flash("Tenés que tildar la casilla de confirmación para borrar todo.", "error")
         return redirect(url_for("settings"))
     c=db()
+    print("[reset] conexión:", type(c).__name__, "| DATABASE_URL activo:", bool(os.environ.get("DATABASE_URL")), "| DB:", DB, flush=True)
     for t in RESET_TABLES:
+        antes=c.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
         c.execute(f"DELETE FROM {t}")
-    for t in ("sync_outbox","sync_state","sync_applied","applied_operations","operations","metadata"):
-        try: c.execute(f"DELETE FROM {t}")
-        except Exception: pass
+        despues=c.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
+        print(f"[reset] {t}: tenía {antes} filas, quedaron {despues}", flush=True)
+    for t in ("sync_outbox","sync_state","sync_applied","applied_operations","operations"):
+        try:
+            antes=c.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
+            c.execute(f"DELETE FROM {t}")
+            print(f"[reset] {t}: tenía {antes} filas (sync)", flush=True)
+        except Exception as e:
+            print(f"[reset] {t}: no existe o falló ({e!r})", flush=True)
     try: c.execute("DELETE FROM sqlite_sequence")
     except Exception: pass
     c.commit(); c.close()
+    chequeo=db(); n_chequeo=chequeo.execute("SELECT COUNT(*) n FROM products").fetchone()["n"]; chequeo.close()
+    print(f"[reset] verificación con conexión NUEVA: products tiene {n_chequeo} filas", flush=True)
     init_db()   # recrea admin/empleado y ajustes por defecto
     try:
         from cloud_launcher import fix_sequences   # solo existe en la nube (Postgres)
