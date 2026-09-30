@@ -8,6 +8,7 @@
 <label>Dirección<input name="company_address" value="{{company.address}}" placeholder="La dirección que quieras mostrar"></label>
 <label>Teléfono<input name="company_phone" value="{{company.phone}}" placeholder="Teléfono"></label>
 <label>Texto al pie del ticket<textarea name="ticket_footer" rows="3">{{company.ticket_footer}}</textarea></label>
+<label>Ancho de papel de la tiketera<select name="ticket_width"><option value="80mm" {% if company.ticket_width=='80mm' %}selected{% endif %}>80 mm (estándar)</option><option value="58mm" {% if company.ticket_width=='58mm' %}selected{% endif %}>58 mm (angosto)</option></select></label>
 </div>
 <div class="card"><h2>💵 Fondo fijo diario de caja</h2>
 <p>Definí cuánto dinero físico debe haber en la caja al comenzar cada día.</p>

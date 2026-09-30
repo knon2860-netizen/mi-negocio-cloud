@@ -6,18 +6,22 @@
 <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <title>Mi Negocio - DonArturo Forrajería</title>
+{% block extra_head %}{% endblock %}
 </head>
 <body>
 {% if session.get('user_id') %}
 <header class="topbar"><div class="brand"><img src="{{ url_for('static', filename='logo.png') }}" alt="DonArturo Forrajería"><span>Mi Negocio</span></div><div class="userbar">{{session.username}} · {{'Administrador' if session.role=='admin' else 'Empleado'}} · <a href="/my-user">Mi usuario</a> · <a href="/change-password">Contraseña</a> · <a href="/logout">Salir</a></div></header>
-<nav class="nav mobile-nav"><a href="/dashboard">Inicio</a><a href="/new-sale">Nueva venta</a><a href="/sales">Ventas</a><a href="/customers">Clientes / Fiados</a>{% if session.role=='admin' %}<a href="/products">Stock</a><a href="/purchases">Compras</a><a href="/suppliers">Proveedores</a><a href="/cash">Caja</a><a href="/reports">Reportes</a><a href="/statistics">Estadísticas</a><a href="/employees">Empleados</a><a href="/settings">Configuración</a><a href="/backup">Backup</a><a href="/restore">Restaurar</a><a href="/audit">Auditoría</a><a href="/sync">🔄 Sincronización</a>{% endif %}</nav>
+<nav class="nav mobile-nav"><a href="/dashboard">Inicio</a><a href="/new-sale">Nueva venta</a><a href="/sales">Ventas</a><a href="/customers">Clientes / Fiados</a>{% if has_perm('products') %}<a href="/products">Stock</a>{% endif %}{% if has_perm('purchases') %}<a href="/purchases">Compras</a>{% endif %}{% if has_perm('suppliers') %}<a href="/suppliers">Proveedores</a>{% endif %}{% if has_perm('cash') %}<a href="/cash">Caja</a>{% endif %}{% if has_perm('reports') %}<a href="/reports">Reportes</a>{% endif %}{% if has_perm('statistics') %}<a href="/statistics">Estadísticas</a>{% endif %}{% if session.role=='admin' %}<a href="/employees">Empleados</a><a href="/settings">Configuración</a><a href="/backup">Backup</a><a href="/restore">Restaurar</a><a href="/audit">Auditoría</a><a href="/sync">🔄 Sincronización</a>{% endif %}</nav>
 <div class="app-shell">
 <aside class="sidebar">
   <div class="side-title">GENERAL</div>
   <a href="/dashboard">⌂ <span>Inicio</span></a><a href="/new-sale">🛒 <span>Nueva venta</span></a><a href="/sales">▤ <span>Ventas</span></a><a href="/customers">👤 <span>Clientes / Fiados</span></a>
-  {% if session.role=='admin' %}
+  {% if has_perm('products') or has_perm('purchases') or has_perm('suppliers') or has_perm('cash') or has_perm('reports') or has_perm('statistics') %}
   <div class="side-title">ADMINISTRACIÓN</div>
-  <a href="/products">▦ <span>Stock</span></a><a href="/purchases">🧾 <span>Compras</span></a><a href="/suppliers">▣ <span>Proveedores</span></a><a href="/cash">💵 <span>Caja</span></a><a href="/reports">▤ <span>Reportes</span></a><a href="/statistics">▥ <span>Estadísticas</span></a><a href="/employees">👥 <span>Empleados</span></a><a href="/settings">⚙ <span>Configuración</span></a>
+  {% if has_perm('products') %}<a href="/products">▦ <span>Stock</span></a>{% endif %}{% if has_perm('purchases') %}<a href="/purchases">🧾 <span>Compras</span></a>{% endif %}{% if has_perm('suppliers') %}<a href="/suppliers">▣ <span>Proveedores</span></a>{% endif %}{% if has_perm('cash') %}<a href="/cash">💵 <span>Caja</span></a>{% endif %}{% if has_perm('reports') %}<a href="/reports">▤ <span>Reportes</span></a>{% endif %}{% if has_perm('statistics') %}<a href="/statistics">▥ <span>Estadísticas</span></a>{% endif %}
+  {% endif %}
+  {% if session.role=='admin' %}
+  <a href="/employees">👥 <span>Empleados</span></a><a href="/settings">⚙ <span>Configuración</span></a>
   <div class="side-title">SINCRONIZACIÓN</div>
   <a href="/sync">🔄 <span>Sincronización</span></a>
   <div class="side-title">SEGURIDAD Y RESPALDO</div>
