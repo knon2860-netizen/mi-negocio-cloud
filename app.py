@@ -135,6 +135,12 @@ def init_db():
     if "fractional" not in pcols:
         c.execute("ALTER TABLE products ADD COLUMN fractional INTEGER DEFAULT 0")
 
+    # Migration: permisos personalizados por empleado.
+    ucols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
+    if "permissions" not in ucols:
+        c.execute("ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT '[]'")
+        c.execute("UPDATE users SET permissions='[]' WHERE permissions IS NULL")
+
     # Migration: anulación de ventas.
     scols = {r["name"] for r in c.execute("PRAGMA table_info(sales)").fetchall()}
     if "status" not in scols:
@@ -201,6 +207,7 @@ def company_settings(c=None):
         "address": get_setting(c, "company_address", ""),
         "phone": get_setting(c, "company_phone", ""),
         "ticket_footer": get_setting(c, "ticket_footer", "Gracias por su compra!"),
+        "ticket_width": get_setting(c, "ticket_width", "80mm"),
     }
     if own: c.close()
     return vals
@@ -232,6 +239,31 @@ def admin_required(f):
             return redirect(url_for("dashboard"))
         return f(*a, **kw)
     return w
+
+PERMISSION_KEYS=("products","purchases","suppliers","cash","reports","statistics")
+PERMISSION_LABELS={"products":"Stock","purchases":"Compras","suppliers":"Proveedores",
+                    "cash":"Caja","reports":"Reportes","statistics":"Estadísticas"}
+
+def has_perm(key):
+    if session.get("role")=="admin": return True
+    try:
+        perms=json.loads(session.get("permissions") or "[]")
+    except Exception:
+        perms=[]
+    return key in perms
+
+def perm_required(key):
+    def deco(f):
+        @wraps(f)
+        def w(*a, **kw):
+            if not has_perm(key):
+                flash("No tenés permiso para acceder a esta sección.", "error")
+                return redirect(url_for("dashboard"))
+            return f(*a, **kw)
+        return w
+    return deco
+
+app.jinja_env.globals["has_perm"]=has_perm
 
 def get_setting(c, key, default=""):
     row=c.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
@@ -283,7 +315,7 @@ def login():
         if user and check_password_hash(user["password"], p):
             session.clear()
             session.permanent = remember
-            session.update(user_id=user["id"], username=user["username"], role=user["role"])
+            session.update(user_id=user["id"], username=user["username"], role=user["role"], permissions=user["permissions"] or "[]")
             audit("LOGIN", "Ingreso al sistema")
             return redirect(url_for("dashboard"))
         flash("Usuario o contraseña incorrectos.", "error")
@@ -314,7 +346,7 @@ def dashboard():
 # Products / stock
 @app.route("/products", methods=["GET","POST"])
 @login_required
-@admin_required
+@perm_required("products")
 def products():
     c=db()
     if request.method=="POST":
@@ -351,7 +383,7 @@ def products():
 
 @app.post("/products/<int:pid>/edit")
 @login_required
-@admin_required
+@perm_required("products")
 def edit_product(pid):
     d=request.form; c=db()
     try:
@@ -399,7 +431,7 @@ def edit_product(pid):
 
 @app.post("/products/<int:pid>/delete")
 @login_required
-@admin_required
+@perm_required("products")
 def delete_product(pid):
     c=db()
     row=c.execute("SELECT * FROM products WHERE id=?",(pid,)).fetchone()
@@ -619,7 +651,7 @@ def cancel_sale(sid):
 # Cash
 @app.route("/cash", methods=["GET","POST"])
 @login_required
-@admin_required
+@perm_required("cash")
 def cash():
     c=db(); current=ensure_daily_cash(c)
     c.commit()
@@ -645,7 +677,7 @@ def cash():
 
 @app.post("/cash/movement")
 @login_required
-@admin_required
+@perm_required("cash")
 def cash_movement():
     c=db(); cashs=ensure_daily_cash(c)
     typ=request.form.get("type")
@@ -659,7 +691,7 @@ def cash_movement():
 # Purchases / suppliers
 @app.route("/suppliers", methods=["GET","POST"])
 @login_required
-@admin_required
+@perm_required("suppliers")
 def suppliers():
     c=db()
     if request.method=="POST":
@@ -672,7 +704,7 @@ def suppliers():
 
 @app.route("/purchases", methods=["GET","POST"])
 @login_required
-@admin_required
+@perm_required("purchases")
 def purchases():
     c=db()
     suppliers=c.execute("SELECT * FROM suppliers WHERE active=1 ORDER BY name").fetchall()
@@ -716,7 +748,7 @@ def stock_device_id():
 
 @app.route("/stock/ajuste", methods=["GET", "POST"])
 @login_required
-@admin_required
+@perm_required("products")
 def stock_adjustment():
     c=db(); products=c.execute("SELECT * FROM products WHERE active=1 ORDER BY name").fetchall()
     if request.method == "POST":
@@ -742,7 +774,7 @@ def stock_adjustment():
 
 @app.get("/stock/historial")
 @login_required
-@admin_required
+@perm_required("products")
 def stock_history():
     c=db(); where=[]; args=[]
     date_from=request.args.get("date_from","").strip(); date_to=request.args.get("date_to","").strip(); product=request.args.get("product","").strip(); reason=request.args.get("reason","").strip(); user=request.args.get("user","").strip(); direction=request.args.get("direction","").strip()
@@ -760,7 +792,7 @@ def stock_history():
 
 @app.get("/stock/historial/<int:mid>")
 @login_required
-@admin_required
+@perm_required("products")
 def stock_movement_detail(mid):
     c=db(); row=c.execute("""SELECT sm.*,p.name product_name,p.barcode,u.username,CASE WHEN sm.qty>0 THEN 'Aumento' ELSE 'Disminución' END direction_label FROM stock_movements sm JOIN products p ON p.id=sm.product_id JOIN users u ON u.id=sm.user_id WHERE sm.id=?""",(mid,)).fetchone(); c.close()
     if not row: flash("Movimiento inexistente.","error"); return redirect(url_for("stock_history"))
@@ -781,8 +813,11 @@ def employees():
             sync_queue(c,"USER_UPSERT",dict(row))
             c.commit(); audit("EMPLOYEE_CREATE",d["username"].strip()); flash("Empleado creado.","ok")
         except sqlite3.IntegrityError: c.rollback(); flash("Ese usuario ya existe.","error")
-    rows=c.execute("SELECT id,username,role,active,created_at FROM users ORDER BY role,username").fetchall()
-    c.close(); return render_template("employees.html", employees=rows)
+    rows=c.execute("SELECT id,username,role,active,created_at,permissions FROM users ORDER BY role,username").fetchall()
+    emp_perms={r["id"]: json.loads(r["permissions"] or "[]") for r in rows}
+    c.close()
+    return render_template("employees.html", employees=rows, emp_perms=emp_perms,
+                            permission_keys=PERMISSION_KEYS, permission_labels=PERMISSION_LABELS)
 
 @app.post("/employees/<int:uid>/toggle")
 @login_required
@@ -794,6 +829,23 @@ def toggle_employee(uid):
     if row: sync_queue(c,"USER_UPSERT",dict(row))
     c.commit(); c.close()
     audit("EMPLOYEE_TOGGLE",f"Usuario #{uid}"); flash("Estado del empleado actualizado.","ok"); return redirect(url_for("employees"))
+
+@app.post("/employees/<int:uid>/permissions")
+@login_required
+@admin_required
+def employee_permissions(uid):
+    c=db()
+    emp=c.execute("SELECT * FROM users WHERE id=? AND role='employee'",(uid,)).fetchone()
+    if not emp:
+        c.close(); flash("El empleado no existe.","error"); return redirect(url_for("employees"))
+    chosen=[k for k in PERMISSION_KEYS if request.form.get(f"perm_{k}")=="1"]
+    c.execute("UPDATE users SET permissions=? WHERE id=?",(json.dumps(chosen),uid))
+    row=c.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
+    sync_queue(c,"USER_UPSERT",dict(row))
+    c.commit(); c.close()
+    audit("EMPLOYEE_PERMISSIONS",f"Usuario #{uid}: {', '.join(chosen) or 'sin permisos extra'}")
+    flash("Permisos actualizados.","ok")
+    return redirect(url_for("employees"))
 
 @app.post("/employees/<int:uid>/delete")
 @login_required
@@ -877,7 +929,7 @@ def change_password():
 # Statistics
 @app.get("/statistics")
 @login_required
-@admin_required
+@perm_required("statistics")
 def statistics():
     c=db()
     t=request.args.get("date") or date.today().isoformat()
@@ -902,7 +954,7 @@ def statistics():
 # Reports
 @app.get("/reports")
 @login_required
-@admin_required
+@perm_required("reports")
 def reports():
     c=db()
     t=request.args.get("date") or date.today().isoformat()
@@ -1042,6 +1094,8 @@ def settings():
             set_setting(c, "company_address", request.form.get("company_address", "").strip())
             set_setting(c, "company_phone", request.form.get("company_phone", "").strip())
             set_setting(c, "ticket_footer", request.form.get("ticket_footer", "").strip())
+            tw=request.form.get("ticket_width","80mm")
+            set_setting(c, "ticket_width", tw if tw in ("58mm","80mm") else "80mm")
             c.commit(); audit("SETTINGS_UPDATE", "Datos de empresa y ticket actualizados")
             flash("Configuración guardada correctamente.", "ok")
         except ValueError:
