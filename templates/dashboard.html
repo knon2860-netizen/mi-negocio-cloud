@@ -1,12 +1,12 @@
 {% extends "base.html" %}{% block content %}
-<div class="pagehead"><div><h1>Panel principal</h1><p class="muted">Resumen del negocio</p></div>{% if session.role=='admin' %}<a class="btn" href="/cash">💵 Caja del día</a>{% endif %}</div>
+<div class="pagehead"><div><h1>Panel principal</h1><p class="muted">Resumen del negocio</p></div>{% if has_perm('cash') %}<a class="btn" href="/cash">💵 Caja del día</a>{% endif %}</div>
 <div class="grid stats">
 <div class="card stat"><span>Ventas de hoy</span><strong>$ {{sales_today.total|ars}}</strong><small>{{sales_today.n}} ventas</small></div>
-<div class="card stat"><span>Ganancia estimada</span><strong>$ {{profit|ars}}</strong><small>según costo cargado</small></div>
-<div class="card stat"><span>Stock bajo</span><strong>{{low}}</strong><small>productos</small></div>
+{% if session.role=='admin' %}<div class="card stat"><span>Ganancia estimada</span><strong>$ {{profit|ars}}</strong><small>según costo cargado</small></div>{% endif %}
+{% if has_perm('products') %}<div class="card stat"><span>Stock bajo</span><strong>{{low}}</strong><small>productos</small></div>{% endif %}
 <div class="card stat"><span>Fiados pendientes</span><strong>$ {{debt|ars}}</strong><small>saldo total</small></div>
 </div>
 <div class="grid two">
-<div class="card"><h2>Acciones rápidas</h2><div class="actions"><a class="btn big" href="/new-sale">➕ Nueva venta</a><a class="btn" href="/customers">👤 Clientes / fiados</a>{% if session.role=='admin' %}<a class="btn" href="/products">📦 Stock</a><a class="btn" href="/purchases">🚚 Registrar compra</a>{% endif %}</div></div>
-<div class="card"><h2>Permisos</h2>{% if session.role=='admin' %}<p>Tenés acceso total: precios, stock, compras, caja, reportes, empleados y respaldos.</p>{% else %}<p>Podés vender, cobrar, consultar ventas y gestionar lo necesario para clientes/fiados. No podés cambiar precios, stock ni configuración.</p>{% endif %}</div>
+<div class="card"><h2>Acciones rápidas</h2><div class="actions"><a class="btn big" href="/new-sale">➕ Nueva venta</a><a class="btn" href="/customers">👤 Clientes / fiados</a>{% if has_perm('products') %}<a class="btn" href="/products">📦 Stock</a>{% endif %}{% if has_perm('purchases') %}<a class="btn" href="/purchases">🚚 Registrar compra</a>{% endif %}</div></div>
+<div class="card"><h2>Permisos</h2>{% if session.role=='admin' %}<p>Tenés acceso total: precios, stock, compras, caja, reportes, empleados y respaldos.</p>{% else %}<p>Podés vender, cobrar, consultar ventas y gestionar lo necesario para clientes/fiados.{% if has_perm('products') %} Podés ver y gestionar Stock.{% endif %}{% if has_perm('cash') %} Podés ver y gestionar Caja.{% endif %}{% if has_perm('purchases') %} Podés registrar Compras.{% endif %}{% if has_perm('suppliers') %} Podés ver Proveedores.{% endif %}{% if has_perm('reports') %} Podés ver Reportes.{% endif %}{% if has_perm('statistics') %} Podés ver Estadísticas.{% endif %}{% if has_perm('cancel_sale') %} Podés anular ventas.{% endif %} No podés ver la ganancia estimada ni cambiar la configuración.</p>{% endif %}</div>
 </div>{% endblock %}
