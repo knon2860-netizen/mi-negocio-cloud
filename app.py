@@ -240,9 +240,10 @@ def admin_required(f):
         return f(*a, **kw)
     return w
 
-PERMISSION_KEYS=("products","purchases","suppliers","cash","reports","statistics")
+PERMISSION_KEYS=("products","purchases","suppliers","cash","reports","statistics","cancel_sale")
 PERMISSION_LABELS={"products":"Stock","purchases":"Compras","suppliers":"Proveedores",
-                    "cash":"Caja","reports":"Reportes","statistics":"Estadísticas"}
+                    "cash":"Caja","reports":"Reportes","statistics":"Estadísticas",
+                    "cancel_sale":"Anular ventas"}
 
 def has_perm(key):
     if session.get("role")=="admin": return True
@@ -615,11 +616,11 @@ def sale_detail(sid):
     c.close()
     return render_template("sale_detail.html", sale=s, items=items, company=company,
                             cancelled_by_name=cancelled_by_name,
-                            can_cancel=(session.get("role")=="admin" and (s["status"] or "valida")!="anulada"))
+                            can_cancel=(has_perm("cancel_sale") and (s["status"] or "valida")!="anulada"))
 
 @app.post("/sale/<int:sid>/cancel")
 @login_required
-@admin_required
+@perm_required("cancel_sale")
 def cancel_sale(sid):
     c=db()
     s=c.execute("SELECT * FROM sales WHERE id=?",(sid,)).fetchone()
