@@ -4,6 +4,12 @@
 <div class="card"><div class="tablewrap"><table><tr><th>Usuario</th><th>Rol</th><th>Estado</th><th>Acción</th></tr>{% for e in employees %}<tr><td>{{e.username}}</td><td>{{'Administrador' if e.role=='admin' else 'Empleado'}}</td><td>{{'Activo' if e.active else 'Inactivo'}}</td><td>{% if e.role=='employee' %}<div class="actions"><form method="post" action="/employees/{{e.id}}/toggle"><button class="small">{{'Desactivar' if e.active else 'Activar'}}</button></form><form method="post" action="/employees/{{e.id}}/delete" onsubmit="return confirm('¿Eliminar definitivamente este empleado? Si tiene historial de ventas, compras, caja o auditoría no se podrá borrar.');"><button class="small danger">Eliminar</button></form></div>{% else %}-{% endif %}</td></tr>{% if e.role=='employee' %}<tr><td colspan="4"><details><summary>Permisos de {{e.username}}</summary>
 <form method="post" action="/employees/{{e.id}}/permissions" class="formgrid">
 {% for key in permission_keys %}<label style="display:inline-flex;align-items:center;gap:6px;margin-right:16px"><input type="checkbox" name="perm_{{key}}" value="1" {% if key in emp_perms[e.id] %}checked{% endif %}> {{permission_labels[key]}}</label>{% endfor %}
+<div style="margin-top:14px"><label>En "Nueva venta", buscar productos por
+<select name="search_mode">
+<option value="both" {% if e.search_mode=='both' or not e.search_mode %}selected{% endif %}>Nombre y código (ambos)</option>
+<option value="name" {% if e.search_mode=='name' %}selected{% endif %}>Solo por nombre</option>
+<option value="code" {% if e.search_mode=='code' %}selected{% endif %}>Solo por código</option>
+</select></label></div>
 <button class="small" type="submit" style="margin-top:10px">Guardar permisos</button>
 </form>
 <p class="muted">Además de lo tildado, el empleado siempre ve Inicio, Nueva venta, Ventas y Clientes/Fiados.</p>
