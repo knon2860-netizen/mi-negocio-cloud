@@ -169,11 +169,11 @@ def apply_op(c,op):
         if not uid or not p.get('username'): return False
         import datetime as _dt
         try:
-            c.execute('''INSERT INTO users(id,username,password,role,active,created_at,permissions) VALUES(?,?,?,?,?,?,?)
-                         ON CONFLICT(id) DO UPDATE SET username=excluded.username,password=excluded.password,role=excluded.role,active=excluded.active,permissions=excluded.permissions''',
+            c.execute('''INSERT INTO users(id,username,password,role,active,created_at,permissions,search_mode) VALUES(?,?,?,?,?,?,?,?)
+                         ON CONFLICT(id) DO UPDATE SET username=excluded.username,password=excluded.password,role=excluded.role,active=excluded.active,permissions=excluded.permissions,search_mode=excluded.search_mode''',
                       (uid,p.get('username'),p.get('password'),p.get('role','employee'),int(p.get('active',1) or 0),
                        p.get('created_at') or _dt.datetime.now().isoformat(timespec='seconds'),
-                       p.get('permissions') or '[]'))
+                       p.get('permissions') or '[]', p.get('search_mode') or 'both'))
         except Exception:
             return False   # username ya usado por otro id acá; se resuelve a mano si pasa
     elif typ=='USER_DELETE':

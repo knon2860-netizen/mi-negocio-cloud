@@ -135,6 +135,12 @@ def init_db():
     if "fractional" not in pcols:
         c.execute("ALTER TABLE products ADD COLUMN fractional INTEGER DEFAULT 0")
 
+    # Migration: cómo busca productos cada empleado en Nueva venta.
+    ucols2 = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
+    if "search_mode" not in ucols2:
+        c.execute("ALTER TABLE users ADD COLUMN search_mode TEXT DEFAULT 'both'")
+        c.execute("UPDATE users SET search_mode='both' WHERE search_mode IS NULL")
+
     # Migration: permisos personalizados por empleado.
     ucols = {r["name"] for r in c.execute("PRAGMA table_info(users)").fetchall()}
     if "permissions" not in ucols:
@@ -316,7 +322,7 @@ def login():
         if user and check_password_hash(user["password"], p):
             session.clear()
             session.permanent = remember
-            session.update(user_id=user["id"], username=user["username"], role=user["role"], permissions=user["permissions"] or "[]")
+            session.update(user_id=user["id"], username=user["username"], role=user["role"], permissions=user["permissions"] or "[]", search_mode=user["search_mode"] or "both")
             audit("LOGIN", "Ingreso al sistema")
             return redirect(url_for("dashboard"))
         flash("Usuario o contraseña incorrectos.", "error")
@@ -593,7 +599,9 @@ def new_sale():
             return redirect(url_for("new_sale"))
         except Exception as e:
             c.rollback(); flash(str(e),"error")
-    c.close(); return render_template("new_sale.html", products=products, customers=customers)
+    c.close()
+    sm=session.get("search_mode") or "both"
+    return render_template("new_sale.html", products=products, customers=customers, search_mode=sm)
 
 @app.get("/sale/<int:sid>")
 @login_required
@@ -814,7 +822,7 @@ def employees():
             sync_queue(c,"USER_UPSERT",dict(row))
             c.commit(); audit("EMPLOYEE_CREATE",d["username"].strip()); flash("Empleado creado.","ok")
         except sqlite3.IntegrityError: c.rollback(); flash("Ese usuario ya existe.","error")
-    rows=c.execute("SELECT id,username,role,active,created_at,permissions FROM users ORDER BY role,username").fetchall()
+    rows=c.execute("SELECT id,username,role,active,created_at,permissions,search_mode FROM users ORDER BY role,username").fetchall()
     emp_perms={r["id"]: json.loads(r["permissions"] or "[]") for r in rows}
     c.close()
     return render_template("employees.html", employees=rows, emp_perms=emp_perms,
@@ -840,7 +848,9 @@ def employee_permissions(uid):
     if not emp:
         c.close(); flash("El empleado no existe.","error"); return redirect(url_for("employees"))
     chosen=[k for k in PERMISSION_KEYS if request.form.get(f"perm_{k}")=="1"]
-    c.execute("UPDATE users SET permissions=? WHERE id=?",(json.dumps(chosen),uid))
+    search_mode=request.form.get("search_mode","both")
+    if search_mode not in ("both","name","code"): search_mode="both"
+    c.execute("UPDATE users SET permissions=?, search_mode=? WHERE id=?",(json.dumps(chosen),search_mode,uid))
     row=c.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
     sync_queue(c,"USER_UPSERT",dict(row))
     c.commit(); c.close()
