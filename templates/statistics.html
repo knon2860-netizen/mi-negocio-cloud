@@ -13,5 +13,11 @@
 <div class="card"><h2>Transferencias</h2><strong>$ {{payments.transfer|ars}}</strong><p>{{'%.2f'|format(transfer_pct)}} % de las ventas</p></div>
 <div class="card"><h2>Fiado</h2><strong>$ {{payments.credit|ars}}</strong><p>{{'%.2f'|format(credit_pct)}} % de las ventas</p></div>
 </div>
+<div class="pagehead"><div><h2>Valor del stock actual</h2><p class="muted">Según lo que hay cargado hoy, sin importar la fecha elegida arriba</p></div></div>
+<div class="grid stats">
+<div class="card stat"><span>Dinero invertido en stock</span><strong>$ {{stock_cost_value|ars}}</strong><small>stock × costo de cada producto</small></div>
+<div class="card stat"><span>Valor de venta del stock</span><strong>$ {{stock_sale_value|ars}}</strong><small>stock × precio de venta</small></div>
+<div class="card stat"><span>Ganancia si se vende todo</span><strong>$ {{stock_potential_profit|ars}}</strong><small>valor de venta − dinero invertido</small></div>
+</div>
 <div class="card"><h2>Cómo se calcula</h2><p><b>Ganancia estimada</b> = ventas − costo de los productos vendidos.</p><p><b>Ganancia sobre costo</b> = ganancia ÷ costo × 100.</p><p><b>Margen sobre venta</b> = ganancia ÷ ventas × 100.</p><p class="muted">Los porcentajes corresponden al día seleccionado y son estimados según el costo de compra registrado de cada producto.</p></div>
 {% endblock %}

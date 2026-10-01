@@ -7,10 +7,10 @@
 <label class="checkline"><input name="fractional" type="checkbox" value="1"> Se vende fraccionado <small>Permite vender, por ejemplo, 700 g de un producto cuyo stock está cargado en kg.</small></label>
 <button>Agregar producto</button></form></div>
 <div class="card"><div class="toolbar"><input id="filter" placeholder="Buscar producto..." oninput="filterTable()"><span>{{products|length}} productos</span></div>
-<div class="tablewrap"><table id="ptable"><tr><th>Producto</th><th>Código</th><th>Categoría</th><th>Stock</th><th>Venta</th><th>Precio</th><th></th></tr>
+<div class="tablewrap"><table id="ptable"><tr><th>Producto</th><th id="codeHeader" style="cursor:pointer;user-select:none" onclick="sortByCode()">Código <span id="codeSortArrow">⇅</span></th><th>Categoría</th><th>Stock</th><th>Venta</th><th>Precio</th><th></th></tr>
 {% for p in products %}<tr><td><b>{{p.name}}</b></td><td>{{p.barcode or '-'}}</td><td>{{p.category or '-'}}</td><td class="{{'danger' if p.stock<0 else ('low' if p.stock<=p.min_stock else '')}}">{{p.stock}}{% if p.fractional %} kg{% endif %}</td><td>{% if p.fractional %}<span class="badge">Fraccionado</span>{% else %}Entero{% endif %}</td><td>$ {{p.sell_price|ars}}{% if p.fractional %} / kg{% endif %}</td><td><details><summary>Editar producto</summary>
 <form method="post" action="/products/{{p.id}}/edit" class="formgrid compact">
-<div class="wide"><strong>Editar producto: {{p.name}}</strong></div>
+<div class="wide"><strong>Editar producto</strong> <small class="muted">(el nombre se cambia en el campo "Nombre" de abajo)</small></div>
 <label>Código de barras<input name="barcode" value="{{p.barcode or ''}}"></label>
 <label>Nombre<input name="name" value="{{p.name}}" required></label>
 <label>Categoría<input name="category" value="{{p.category or ''}}"></label>
@@ -28,5 +28,23 @@
 <button>Guardar cambios</button></form>
 <form method="post" action="/products/{{p.id}}/delete" onsubmit="return confirm('¿Desactivar producto?')"><button class="danger small">Desactivar producto</button></form></details></td></tr>{% endfor %}
 </table></div></div>
-<script>function filterTable(){let q=document.getElementById('filter').value.toLowerCase();document.querySelectorAll('#ptable tr').forEach((r,i)=>{if(i)r.style.display=r.innerText.toLowerCase().includes(q)?'':'none'})}</script>
+<script>
+function filterTable(){let q=document.getElementById('filter').value.toLowerCase();document.querySelectorAll('#ptable tr').forEach((r,i)=>{if(i)r.style.display=r.innerText.toLowerCase().includes(q)?'':'none'})}
+let codeSortDir=0; // 0=sin ordenar, 1=ascendente, -1=descendente
+function sortByCode(){
+  const table=document.getElementById('ptable');
+  const rows=Array.from(table.querySelectorAll('tr')).slice(1); // saltea el encabezado
+  codeSortDir = codeSortDir===1 ? -1 : 1;
+  document.getElementById('codeSortArrow').textContent = codeSortDir===1 ? '▲' : '▼';
+  rows.sort((a,b)=>{
+    const ca=a.children[1].innerText.trim(), cb=b.children[1].innerText.trim();
+    const na=parseFloat(ca.replace(',','.')), nb=parseFloat(cb.replace(',','.'));
+    let cmp;
+    if(!isNaN(na) && !isNaN(nb) && ca!=='-' && cb!=='-') cmp = na-nb;
+    else cmp = ca.localeCompare(cb, 'es', {numeric:true});
+    return cmp*codeSortDir;
+  });
+  rows.forEach(r=>table.appendChild(r));
+}
+</script>
 {% endblock %}
