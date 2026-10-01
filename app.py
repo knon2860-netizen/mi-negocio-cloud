@@ -949,8 +949,15 @@ def statistics():
     cash_pct=(payments["cash"]/totals["total"]*100) if totals["total"] else 0
     transfer_pct=(payments["transfer"]/totals["total"]*100) if totals["total"] else 0
     credit_pct=(payments["credit"]/totals["total"]*100) if totals["total"] else 0
+    stock_value=c.execute("""SELECT COALESCE(SUM(stock*buy_price),0) cost_value,
+                             COALESCE(SUM(stock*sell_price),0) sale_value
+                             FROM products WHERE active=1""").fetchone()
+    stock_cost_value=stock_value["cost_value"]
+    stock_sale_value=stock_value["sale_value"]
+    stock_potential_profit=stock_sale_value-stock_cost_value
     c.close()
-    return render_template("statistics.html", day=t, totals=totals, cost=cost, profit=profit, markup=markup, margin=margin, payments=payments, cash_pct=cash_pct, transfer_pct=transfer_pct, credit_pct=credit_pct)
+    return render_template("statistics.html", day=t, totals=totals, cost=cost, profit=profit, markup=markup, margin=margin, payments=payments, cash_pct=cash_pct, transfer_pct=transfer_pct, credit_pct=credit_pct,
+                            stock_cost_value=stock_cost_value, stock_sale_value=stock_sale_value, stock_potential_profit=stock_potential_profit)
 
 # Reports
 @app.get("/reports")
