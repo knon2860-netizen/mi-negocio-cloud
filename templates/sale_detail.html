@@ -1,4 +1,6 @@
-{% extends "base.html" %}{% block content %}
+{% extends "base.html" %}
+{% block extra_head %}<style>@page{size:{{ company.ticket_width or '80mm' }} auto;margin:0}</style>{% endblock %}
+{% block content %}
 <div class="pagehead"><div><h1>Venta #{{sale.id}}{% if sale.status=='anulada' %} <span class="badge">ANULADA</span>{% endif %}</h1><p class="muted">{{sale.created_at}} · {{sale.username}}</p></div><button class="btn" onclick="window.print()">🖨️ Imprimir</button></div>
 {% if sale.status=='anulada' %}
 <div class="card danger"><b>Esta venta fue anulada</b>{% if sale.cancelled_at %} el {{sale.cancelled_at}}{% endif %}{% if cancelled_by_name %} por {{cancelled_by_name}}{% endif %}.{% if sale.cancel_reason %} Motivo: {{sale.cancel_reason}}{% endif %} El stock ya fue repuesto.</div>
@@ -9,9 +11,9 @@
 <button class="btn danger" type="submit">Anular venta</button>
 </form></details></div>
 {% endif %}
-<div class="ticket card">
+<div class="ticket card ticket-{{ (company.ticket_width or '80mm')[:2] }}">
 <div class="ticket-logo"><img src="{{ url_for('static', filename='logo.png') }}" alt="Logo"></div>
 <div class="ticket-company"><strong>{{company.company_name}}</strong>{% if company.cuit %}<div>CUIT: {{company.cuit}}</div>{% endif %}{% if company.address %}<div>Dirección: {{company.address}}</div>{% endif %}{% if company.phone %}<div>Tel.: {{company.phone}}</div>{% endif %}</div>
 <hr><p><b>TICKET Nº:</b> {{sale.id}}<br><b>Fecha:</b> {{sale.created_at}}<br><b>Vendedor:</b> {{sale.username}}{% if sale.customer %}<br><b>Cliente:</b> {{sale.customer}}{% endif %}</p><hr>
-{% for i in items %}<div class="ticketrow"><span>{{i.name}} × {% if i.qty == i.qty|round(0) %}{{i.qty|int}}{% else %}{{(i.qty*1000)|round(0)|int}} g{% endif %}<small> · ${{i.unit_price|ars}} c/u</small></span><b>$ {{i.subtotal|ars}}</b></div>{% endfor %}<hr><div class="tickettotal"><span>TOTAL</span><b>$ {{sale.total|ars}}</b></div><p>Pago: {{sale.payment}}</p>{% if company.ticket_footer %}<hr><p class="ticket-footer">{{company.ticket_footer}}</p>{% endif %}
+{% for i in items %}<div class="ticketrow"><span>{{i.name}} × {% if i.qty == i.qty|round(0) %}{{i.qty|int}}{% else %}{{(i.qty*1000)|round(0)|int}} g{% endif %}<small> · ${{i.unit_price|ars}} c/u</small></span><b>$ {{i.subtotal|ars}}</b></div>{% endfor %}<hr><div class="tickettotal"><span>TOTAL</span><b>$ {{sale.total|ars}}</b></div><p>Pago: {% if sale.payment=='mixto' %}Mixto (efectivo ${{sale.payment_cash|ars}} + transferencia ${{sale.payment_transfer|ars}}){% else %}{{sale.payment}}{% endif %}</p>{% if company.ticket_footer %}<hr><p class="ticket-footer">{{company.ticket_footer}}</p>{% endif %}
 </div>{% endblock %}

@@ -53,8 +53,13 @@
         </select>
       </label>
       <label>Forma de pago
-        <select name="payment" id="payment"><option value="efectivo">Efectivo</option><option value="transferencia">Transferencia</option><option value="fiado">Fiado</option></select>
+        <select name="payment" id="payment" onchange="togglePaymentSplit()"><option value="efectivo">Efectivo</option><option value="transferencia">Transferencia</option><option value="fiado">Fiado</option><option value="mixto">Mixto (efectivo + transferencia)</option></select>
       </label>
+      <div id="paymentSplit" style="display:none">
+        <label>Monto en efectivo<input type="number" step="0.01" min="0" id="paymentCash" name="payment_cash" value="0" oninput="updatePaymentSplitRemaining()"></label>
+        <label>Monto en transferencia<input type="number" step="0.01" min="0" id="paymentTransfer" name="payment_transfer" value="0" oninput="updatePaymentSplitRemaining()"></label>
+        <p id="paymentSplitHint" class="muted"></p>
+      </div>
       {% if not cash_open %}<p class="warning">La caja está cerrada. Las ventas en efectivo requieren una caja abierta por el administrador.</p>{% endif %}
       <button class="big finish-sale" type="submit">Finalizar venta</button>
     </form>
@@ -107,6 +112,7 @@ function addToCart(p,qty){
   document.getElementById('search').focus();
 }
 
+let cartTotal=0;
 function render(){
   let h='',total=0;
   cart.forEach((x,i)=>{
@@ -117,6 +123,26 @@ function render(){
   });
   document.getElementById('cart').innerHTML=h||'<p class="muted">Todavía no agregaste productos.</p>';
   document.getElementById('total').textContent=formatARS(total);
+  cartTotal=total;
+  if(document.getElementById('payment').value==='mixto') updatePaymentSplitRemaining();
+}
+function togglePaymentSplit(){
+  let mixto=document.getElementById('payment').value==='mixto';
+  document.getElementById('paymentSplit').style.display=mixto?'block':'none';
+  if(mixto){
+    document.getElementById('paymentCash').value=cartTotal.toFixed(2);
+    document.getElementById('paymentTransfer').value='0';
+    updatePaymentSplitRemaining();
+  }
+}
+function updatePaymentSplitRemaining(){
+  let cash=Number(document.getElementById('paymentCash').value)||0;
+  let transfer=Number(document.getElementById('paymentTransfer').value)||0;
+  let remaining=Number((cartTotal-cash-transfer).toFixed(2));
+  let hint=document.getElementById('paymentSplitHint');
+  if(Math.abs(remaining)<0.01){ hint.textContent='Los montos cubren el total. ✔'; hint.style.color='#15803d'; }
+  else if(remaining>0){ hint.textContent='Falta cubrir $'+formatARS(remaining)+' del total.'; hint.style.color='#b91c1c'; }
+  else{ hint.textContent='Te pasaste por $'+formatARS(-remaining)+' del total.'; hint.style.color='#b91c1c'; }
 }
 function changePrice(i,value){
   let price=Number(value);
@@ -145,6 +171,14 @@ function filterProducts(){
 function submitSale(){
   if(!cart.length){alert('El carrito está vacío. Seleccioná un producto, indicá la cantidad y presioná "Agregar al carrito".');return false}
   if(document.getElementById('payment').value==='fiado'&&!document.getElementById('customer').value){alert('Seleccioná un cliente para el fiado');return false}
+  if(document.getElementById('payment').value==='mixto'){
+    let cash=Number(document.getElementById('paymentCash').value)||0;
+    let transfer=Number(document.getElementById('paymentTransfer').value)||0;
+    if(Math.abs((cash+transfer)-cartTotal)>=0.01){
+      alert('El efectivo + la transferencia tienen que sumar exactamente el total de la venta ($'+formatARS(cartTotal)+').');
+      return false;
+    }
+  }
   document.getElementById('items').value=JSON.stringify(cart.map(x=>({id:x.id,qty:x.qty,unit_price:x.price})));
   return true;
 }
