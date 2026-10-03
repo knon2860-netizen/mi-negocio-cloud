@@ -130,17 +130,22 @@ def apply_op(c,op):
         sid=int(p.get('sale_id') or 0); items=p.get('items') or []
         if not sid or c.execute('SELECT 1 FROM sales WHERE id=?',(sid,)).fetchone(): return False
         uid=int(p.get('user_id') or 1); cid=p.get('customer_id'); cid=int(cid) if cid and c.execute('SELECT 1 FROM customers WHERE id=?',(int(cid),)).fetchone() else None; pay=str(p.get('payment') or 'efectivo')
+        pay_cash=float(p.get('payment_cash') or 0); pay_transfer=float(p.get('payment_transfer') or 0)
         cash=None
-        if pay=='efectivo':
+        if pay=='efectivo' or (pay=='mixto' and pay_cash>0):
             cash=c.execute("SELECT * FROM cash_sessions WHERE status='open' ORDER BY id DESC LIMIT 1").fetchone()
-        c.execute('INSERT INTO sales(id,user_id,customer_id,cash_session_id,total,payment,created_at) VALUES(?,?,?,?,?,?,?)',(sid,uid,cid,cash['id'] if cash else None,float(p.get('total') or 0),pay,p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
+        c.execute('INSERT INTO sales(id,user_id,customer_id,cash_session_id,total,payment,created_at,payment_cash,payment_transfer) VALUES(?,?,?,?,?,?,?,?,?)',
+                  (sid,uid,cid,cash['id'] if cash else None,float(p.get('total') or 0),pay,p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds'),pay_cash,pay_transfer))
         for it in items:
             pid=int(it.get('product_id') or 0)
             if not pid: continue
             qty=float(it.get('qty') or 0); price=float(it.get('unit_price') or 0); sub=float(it.get('subtotal') or qty*price); c.execute('INSERT INTO sale_items(sale_id,product_id,qty,unit_price,subtotal) VALUES(?,?,?,?,?)',(sid,pid,qty,price,sub)); c.execute('UPDATE products SET stock=stock-? WHERE id=?',(qty,pid))
         if pay=='fiado' and cid:
             total=float(p.get('total') or 0); c.execute('UPDATE customers SET balance=balance+? WHERE id=?',(total,cid)); c.execute('INSERT INTO account_movements(customer_id,sale_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',(cid,sid,'sale',total,f'Venta fiada #{sid}',p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
-        if pay=='efectivo' and cash: c.execute('INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',(cash['id'],uid,'sale_cash',float(p.get('total') or 0),f'Venta #{sid} sincronizada',p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
+        if pay=='efectivo' and cash:
+            c.execute('INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',(cash['id'],uid,'sale_cash',float(p.get('total') or 0),f'Venta #{sid} sincronizada',p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
+        elif pay=='mixto' and cash and pay_cash>0:
+            c.execute('INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',(cash['id'],uid,'sale_cash',pay_cash,f'Venta #{sid} sincronizada (pago mixto)',p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
     elif typ=='SALE_CANCEL':
         sid=int(p.get('sale_id') or 0)
         if not sid: return False
@@ -156,12 +161,14 @@ def apply_op(c,op):
             c.execute('UPDATE customers SET balance=balance-? WHERE id=?',(s['total'],s['customer_id']))
             c.execute('INSERT INTO account_movements(customer_id,sale_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',
                       (s['customer_id'],sid,'sale_cancel',-s['total'],note,_dt.datetime.now().isoformat(timespec='seconds')))
-        elif s['payment']=='efectivo':
-            row=c.execute("SELECT id FROM cash_sessions WHERE status='open' ORDER BY id DESC LIMIT 1").fetchone()
-            cash_id=row['id'] if row else s['cash_session_id']
-            uid=int(p.get('cancelled_by') or 1)
-            c.execute('INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',
-                      (cash_id,uid,'sale_cancel_cash',-s['total'],note,_dt.datetime.now().isoformat(timespec='seconds')))
+        elif s['payment'] in ('efectivo','mixto'):
+            monto_efectivo = s['total'] if s['payment']=='efectivo' else (s['payment_cash'] or 0)
+            if monto_efectivo:
+                row=c.execute("SELECT id FROM cash_sessions WHERE status='open' ORDER BY id DESC LIMIT 1").fetchone()
+                cash_id=row['id'] if row else s['cash_session_id']
+                uid=int(p.get('cancelled_by') or 1)
+                c.execute('INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',
+                          (cash_id,uid,'sale_cancel_cash',-monto_efectivo,note,_dt.datetime.now().isoformat(timespec='seconds')))
         c.execute("UPDATE sales SET status='anulada', cancelled_at=?, cancelled_by=?, cancel_reason=? WHERE id=?",
                   (p.get('created_at') or _dt.datetime.now().isoformat(timespec='seconds'),p.get('cancelled_by'),reason,sid))
     elif typ=='USER_UPSERT':

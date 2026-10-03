@@ -147,6 +147,13 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT '[]'")
         c.execute("UPDATE users SET permissions='[]' WHERE permissions IS NULL")
 
+    # Migration: pago mixto (parte efectivo, parte transferencia).
+    scols0 = {r["name"] for r in c.execute("PRAGMA table_info(sales)").fetchall()}
+    if "payment_cash" not in scols0:
+        c.execute("ALTER TABLE sales ADD COLUMN payment_cash REAL DEFAULT 0")
+    if "payment_transfer" not in scols0:
+        c.execute("ALTER TABLE sales ADD COLUMN payment_transfer REAL DEFAULT 0")
+
     # Migration: anulación de ventas.
     scols = {r["name"] for r in c.execute("PRAGMA table_info(sales)").fetchall()}
     if "status" not in scols:
@@ -541,9 +548,19 @@ def new_sale():
             if not payload: raise ValueError("El carrito está vacío.")
             payment_type=request.form.get("payment")
             cid=request.form.get("customer_id") or None
-            if payment_type not in ("efectivo","transferencia","fiado"): raise ValueError("Forma de pago inválida.")
+            if payment_type not in ("efectivo","transferencia","fiado","mixto"): raise ValueError("Forma de pago inválida.")
+            pay_cash=pay_transfer=0.0
+            if payment_type=="mixto":
+                try:
+                    pay_cash=round(float(request.form.get("payment_cash") or 0),2)
+                    pay_transfer=round(float(request.form.get("payment_transfer") or 0),2)
+                except (TypeError,ValueError):
+                    raise ValueError("Los montos del pago mixto no son válidos.")
+                if pay_cash<0 or pay_transfer<0: raise ValueError("Los montos del pago mixto no pueden ser negativos.")
+                if pay_cash==0 and pay_transfer==0: raise ValueError("Ingresá al menos un monto en efectivo o transferencia.")
             cash=open_cash(c)
             if payment_type=="efectivo" and not cash: raise ValueError("La caja está cerrada. El administrador debe abrirla.")
+            if payment_type=="mixto" and pay_cash>0 and not cash: raise ValueError("La caja está cerrada. El administrador debe abrirla.")
             total=0; validated=[]
             for item in payload:
                 p=c.execute("SELECT * FROM products WHERE id=? AND active=1",(int(item["id"]),)).fetchone()
@@ -569,9 +586,12 @@ def new_sale():
                 if not cid: raise ValueError("Para fiado debe seleccionar un cliente.")
                 cust=c.execute("SELECT * FROM customers WHERE id=? AND active=1",(cid,)).fetchone()
                 if not cust: raise ValueError("Cliente inválido.")
-            cur=c.execute("""INSERT INTO sales(user_id,customer_id,cash_session_id,total,payment,created_at,status)
-                             VALUES(?,?,?,?,?,?,?)""",
-                          (session["user_id"],cid,cash["id"] if payment_type=="efectivo" and cash else None,total,payment_type,now(),"valida"))
+            if payment_type=="mixto" and abs((pay_cash+pay_transfer)-total) > 0.01:
+                raise ValueError(f"Los montos del pago mixto (${pay_cash:.2f} + ${pay_transfer:.2f}) no suman el total de la venta (${total:.2f}).")
+            cur=c.execute("""INSERT INTO sales(user_id,customer_id,cash_session_id,total,payment,created_at,status,payment_cash,payment_transfer)
+                             VALUES(?,?,?,?,?,?,?,?,?)""",
+                          (session["user_id"],cid,cash["id"] if (payment_type=="efectivo" or (payment_type=="mixto" and pay_cash>0)) and cash else None,
+                           total,payment_type,now(),"valida",pay_cash,pay_transfer))
             sid=cur.lastrowid
             for p,qty,unit_price,subtotal in validated:
                 c.execute("""INSERT INTO sale_items(sale_id,product_id,qty,unit_price,subtotal)
@@ -584,7 +604,10 @@ def new_sale():
             elif payment_type=="efectivo":
                 c.execute("""INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at)
                              VALUES(?,?,?,?,?,?)""",(cash["id"],session["user_id"],"sale_cash",total,f"Venta #{sid}",now()))
-            sync_queue(c, "SALE", {"sale_id":sid,"user_id":session["user_id"],"customer_id":cid,"total":total,"payment":payment_type,"items":[{"product_id":p["id"],"barcode":p["barcode"],"qty":qty,"base_price":float(p["sell_price"]),"unit_price":unit_price,"subtotal":subtotal} for p,qty,unit_price,subtotal in validated],"created_at":now()}); c.commit()
+            elif payment_type=="mixto" and pay_cash>0 and cash:
+                c.execute("""INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at)
+                             VALUES(?,?,?,?,?,?)""",(cash["id"],session["user_id"],"sale_cash",pay_cash,f"Venta #{sid} (pago mixto, parte efectivo)",now()))
+            sync_queue(c, "SALE", {"sale_id":sid,"user_id":session["user_id"],"customer_id":cid,"total":total,"payment":payment_type,"payment_cash":pay_cash,"payment_transfer":pay_transfer,"items":[{"product_id":p["id"],"barcode":p["barcode"],"qty":qty,"base_price":float(p["sell_price"]),"unit_price":unit_price,"subtotal":subtotal} for p,qty,unit_price,subtotal in validated],"created_at":now()}); c.commit()
             price_notes=[]
             for p,qty,unit_price,subtotal in validated:
                 base_price=float(p["sell_price"])
@@ -645,10 +668,12 @@ def cancel_sale(sid):
         c.execute("UPDATE customers SET balance=balance-? WHERE id=?",(s["total"],s["customer_id"]))
         c.execute("""INSERT INTO account_movements(customer_id,sale_id,type,amount,note,created_at)
                      VALUES(?,?,?,?,?,?)""",(s["customer_id"],sid,"sale_cancel",-s["total"],note,now()))
-    elif s["payment"]=="efectivo":
-        cash=open_cash(c)
-        c.execute("""INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at)
-                     VALUES(?,?,?,?,?,?)""",(cash["id"] if cash else s["cash_session_id"],session["user_id"],"sale_cancel_cash",-s["total"],note,now()))
+    elif s["payment"] in ("efectivo","mixto"):
+        monto_efectivo = s["total"] if s["payment"]=="efectivo" else (s["payment_cash"] or 0)
+        if monto_efectivo:
+            cash=open_cash(c)
+            c.execute("""INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at)
+                         VALUES(?,?,?,?,?,?)""",(cash["id"] if cash else s["cash_session_id"],session["user_id"],"sale_cancel_cash",-monto_efectivo,note,now()))
     c.execute("UPDATE sales SET status='anulada', cancelled_at=?, cancelled_by=?, cancel_reason=? WHERE id=?",
               (now(),session["user_id"],reason,sid))
     sync_queue(c, "SALE_CANCEL", {"sale_id":sid,"cancelled_by":session["user_id"],"reason":reason,"created_at":now()})
@@ -952,8 +977,8 @@ def statistics():
     markup=(profit/cost*100) if cost else 0
     margin=(profit/totals["total"]*100) if totals["total"] else 0
     payments=c.execute("""SELECT
-        COALESCE(SUM(CASE WHEN payment='efectivo' THEN total ELSE 0 END),0) cash,
-        COALESCE(SUM(CASE WHEN payment='transferencia' THEN total ELSE 0 END),0) transfer,
+        COALESCE(SUM(CASE WHEN payment='efectivo' THEN total WHEN payment='mixto' THEN payment_cash ELSE 0 END),0) cash,
+        COALESCE(SUM(CASE WHEN payment='transferencia' THEN total WHEN payment='mixto' THEN payment_transfer ELSE 0 END),0) transfer,
         COALESCE(SUM(CASE WHEN payment='fiado' THEN total ELSE 0 END),0) credit
         FROM sales WHERE substr(created_at,1,10)=? AND status<>'anulada'""",(t,)).fetchone()
     cash_pct=(payments["cash"]/totals["total"]*100) if totals["total"] else 0
