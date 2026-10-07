@@ -51,6 +51,27 @@ def db():
 def now():
     return datetime.now().isoformat(timespec="seconds")
 
+# --- Numeración de ventas por rangos (evita choques entre PC y nube al sincronizar) ---
+# PC: 10.000.001 en adelante. Nube (PostgreSQL / DATABASE_URL): 20.000.001 en adelante.
+# Las ventas viejas (1, 2, 3...) se conservan tal cual.
+SALE_ID_SPAN = 10_000_000
+def _sale_id_base():
+    try:
+        v = int(os.environ.get("MI_NEGOCIO_SALE_ID_BASE", "").strip())
+        if v > 0: return v
+    except ValueError:
+        pass
+    return 20_000_000 if os.environ.get("DATABASE_URL", "").strip() else 10_000_000
+SALE_ID_BASE = _sale_id_base()
+
+def next_sale_id(c):
+    """Próximo número de venta dentro del rango de ESTE dispositivo.
+    Ignora las ventas que llegaron de otro dispositivo (rango distinto)."""
+    lo = SALE_ID_BASE; hi = lo + SALE_ID_SPAN
+    r = c.execute("SELECT MAX(id) AS m FROM sales WHERE id>? AND id<?", (lo, hi)).fetchone()
+    m = r["m"] if r and r["m"] is not None else lo
+    return int(m) + 1
+
 def init_db():
     c = db()
     c.executescript("""
@@ -608,11 +629,14 @@ def new_sale():
                 if not cust: raise ValueError("Cliente inválido.")
             if payment_type=="mixto" and abs((pay_cash+pay_transfer)-total) > 0.01:
                 raise ValueError(f"Los montos del pago mixto (${pay_cash:.2f} + ${pay_transfer:.2f}) no suman el total de la venta (${total:.2f}).")
-            cur=c.execute("""INSERT INTO sales(user_id,customer_id,cash_session_id,total,payment,created_at,status,payment_cash,payment_transfer)
-                             VALUES(?,?,?,?,?,?,?,?,?)""",
-                          (session["user_id"],cid,cash["id"] if (payment_type=="efectivo" or (payment_type=="mixto" and pay_cash>0)) and cash else None,
-                           total,payment_type,now(),"valida",pay_cash,pay_transfer))
-            sid=cur.lastrowid
+            # El número de venta se asigna explícitamente dentro del rango propio de este
+            # dispositivo (PC: desde 10.000.001, nube: desde 20.000.001), para que PC y nube
+            # nunca generen el mismo número y la sincronización no descarte ventas.
+            sid=next_sale_id(c)
+            c.execute("""INSERT INTO sales(id,user_id,customer_id,cash_session_id,total,payment,created_at,status,payment_cash,payment_transfer)
+                         VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                      (sid,session["user_id"],cid,cash["id"] if (payment_type=="efectivo" or (payment_type=="mixto" and pay_cash>0)) and cash else None,
+                       total,payment_type,now(),"valida",pay_cash,pay_transfer))
             for p,qty,unit_price,subtotal in validated:
                 c.execute("""INSERT INTO sale_items(sale_id,product_id,qty,unit_price,subtotal)
                              VALUES(?,?,?,?,?)""",(sid,p["id"],qty,unit_price,subtotal))
