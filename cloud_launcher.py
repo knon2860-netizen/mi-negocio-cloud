@@ -128,16 +128,7 @@ def apply_op(c,op):
         c.execute('''INSERT INTO suppliers(id,name,phone,notes,active) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,phone=excluded.phone,notes=excluded.notes,active=excluded.active''',tuple(p.get(x) for x in ['id','name','phone','notes','active']))
     elif typ=='SALE':
         sid=int(p.get('sale_id') or 0); items=p.get('items') or []
-        if not sid: return False
-        ex=c.execute('SELECT total,created_at FROM sales WHERE id=?',(sid,)).fetchone()
-        if ex:
-            try: same=abs(float(ex['total'] or 0)-float(p.get('total') or 0))<0.01 and str(ex['created_at'] or '')[:19]==str(p.get('created_at') or '')[:19]
-            except (TypeError,ValueError): same=False
-            if same: return False   # duplicado real: ya estaba
-            # Número repetido pero es OTRA venta (numeración vieja): NO se descarta; se guarda con
-            # un número nuevo del rango de la nube y se recuerda la equivalencia.
-            old_sid=sid; sid=__import__('app').next_sale_id(c)
-            c.execute('INSERT INTO sale_id_map(remote_id,local_id) VALUES(?,?) ON CONFLICT(remote_id) DO UPDATE SET local_id=excluded.local_id',(old_sid,sid))
+        if not sid or c.execute('SELECT 1 FROM sales WHERE id=?',(sid,)).fetchone(): return False
         uid=int(p.get('user_id') or 1); cid=p.get('customer_id'); cid=int(cid) if cid and c.execute('SELECT 1 FROM customers WHERE id=?',(int(cid),)).fetchone() else None; pay=str(p.get('payment') or 'efectivo')
         pay_cash=float(p.get('payment_cash') or 0); pay_transfer=float(p.get('payment_transfer') or 0)
         cash=None
@@ -158,8 +149,6 @@ def apply_op(c,op):
     elif typ=='SALE_CANCEL':
         sid=int(p.get('sale_id') or 0)
         if not sid: return False
-        mp=c.execute('SELECT local_id FROM sale_id_map WHERE remote_id=?',(sid,)).fetchone()
-        if mp: sid=int(mp['local_id'])
         s=c.execute('SELECT * FROM sales WHERE id=?',(sid,)).fetchone()
         if not s: return False   # la venta todavía no llegó; se reintenta en otra vuelta
         if (s['status'] or 'valida')=='anulada': return False
@@ -249,7 +238,6 @@ def fix_sequences(c):
 
 # Ensure central sync tables exist after app schema.
 conn=__import__('app').db()
-conn.execute('''CREATE TABLE IF NOT EXISTS sale_id_map(remote_id BIGINT PRIMARY KEY, local_id BIGINT NOT NULL)''')
 if DATABASE_URL:
     conn.execute('''CREATE TABLE IF NOT EXISTS operations(seq BIGSERIAL PRIMARY KEY,op_id TEXT UNIQUE NOT NULL,device_id TEXT NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL,received_at TEXT NOT NULL)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS applied_operations(op_id TEXT PRIMARY KEY,applied_at TEXT NOT NULL)''')
