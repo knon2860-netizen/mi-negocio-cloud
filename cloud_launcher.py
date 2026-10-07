@@ -94,7 +94,7 @@ if DATABASE_URL: sqlite3.connect=connect_proxy
 from app import app, init_db
 init_db()
 
-VALID_OPS={'PRODUCT_UPSERT','CUSTOMER_UPSERT','SUPPLIER_UPSERT','SALE','SALE_CANCEL','PURCHASE','CUSTOMER_PAYMENT','CASH_MOVEMENT','STOCK_ADJUSTMENT','AUDIT','USER_UPSERT','USER_DELETE'}
+VALID_OPS={'PRODUCT_UPSERT','CUSTOMER_UPSERT','SUPPLIER_UPSERT','SALE','SALE_CANCEL','PURCHASE','CUSTOMER_PAYMENT','CUSTOMER_ADJUSTMENT','CASH_MOVEMENT','STOCK_ADJUSTMENT','AUDIT','USER_UPSERT','USER_DELETE'}
 def key_ok(req): return bool(SYNC_KEY) and req.headers.get('X-MiNegocio-Key','')==SYNC_KEY
 
 def apply_op(c,op):
@@ -200,6 +200,16 @@ def apply_op(c,op):
         cid=int(p.get('customer_id') or 0); amount=float(p.get('amount') or 0)
         if not cid or amount<=0: return False
         c.execute('UPDATE customers SET balance=GREATEST(0,balance-?) WHERE id=?',(amount,cid)); c.execute('INSERT INTO account_movements(customer_id,sale_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',(cid,None,'payment',-amount,'Pago sincronizado',p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
+    elif typ=='CUSTOMER_ADJUSTMENT':
+        cid=int(p.get('customer_id') or 0); delta=float(p.get('delta') or 0)
+        if not cid or delta==0 or not c.execute('SELECT 1 FROM customers WHERE id=?',(cid,)).fetchone(): return False
+        row=c.execute('SELECT balance FROM customers WHERE id=?',(cid,)).fetchone()
+        new_balance=max(0,(row['balance'] or 0)+delta)
+        c.execute('UPDATE customers SET balance=? WHERE id=?',(new_balance,cid))
+        reason=str(p.get('reason') or '')
+        c.execute('INSERT INTO account_movements(customer_id,sale_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',
+                  (cid,None,'adjustment',delta,f"Ajuste de saldo sincronizado: {reason}" if reason else "Ajuste de saldo sincronizado",
+                   p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
     elif typ=='CASH_MOVEMENT':
         cash=c.execute("SELECT * FROM cash_sessions WHERE status='open' ORDER BY id DESC LIMIT 1").fetchone(); amount=float(p.get('amount') or 0)
         if not cash or amount==0: return False

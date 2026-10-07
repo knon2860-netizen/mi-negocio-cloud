@@ -253,10 +253,10 @@ def admin_required(f):
         return f(*a, **kw)
     return w
 
-PERMISSION_KEYS=("products","purchases","suppliers","cash","reports","statistics","cancel_sale")
+PERMISSION_KEYS=("products","purchases","suppliers","cash","reports","statistics","cancel_sale","adjust_debt")
 PERMISSION_LABELS={"products":"Stock","purchases":"Compras","suppliers":"Proveedores",
                     "cash":"Caja","reports":"Reportes","statistics":"Estadísticas",
-                    "cancel_sale":"Anular ventas"}
+                    "cancel_sale":"Anular ventas","adjust_debt":"Ajustar saldos de clientes"}
 
 def has_perm(key):
     if session.get("role")=="admin": return True
@@ -500,6 +500,26 @@ def payment(cid):
     sync_queue(c, "CUSTOMER_PAYMENT", {"customer_id":cid,"amount":amount,"created_at":now()}); c.commit(); c.close()
     audit("CUSTOMER_PAYMENT", f"Cliente #{cid}: ${amount:.2f}")
     flash("Pago registrado.","ok"); return redirect(url_for("customers"))
+
+@app.post("/customers/<int:cid>/adjust-balance")
+@login_required
+@perm_required("adjust_debt")
+def adjust_customer_balance(cid):
+    try: delta=round(float(request.form.get("delta") or 0),2)
+    except (TypeError,ValueError): delta=0
+    reason=(request.form.get("reason") or "").strip()
+    if delta==0: flash("Ingresá un monto distinto de cero.","error"); return redirect(url_for("customers"))
+    if not reason: flash("Escribí un motivo para el ajuste.","error"); return redirect(url_for("customers"))
+    c=db(); cust=c.execute("SELECT * FROM customers WHERE id=? AND active=1",(cid,)).fetchone()
+    if not cust: c.close(); flash("Cliente inexistente.","error"); return redirect(url_for("customers"))
+    new_balance=max(0,cust["balance"]+delta)
+    applied=new_balance-cust["balance"]
+    c.execute("UPDATE customers SET balance=? WHERE id=?",(new_balance,cid))
+    c.execute("""INSERT INTO account_movements(customer_id,type,amount,note,created_at)
+                 VALUES(?,?,?,?,?)""",(cid,"adjustment",applied,f"Ajuste de saldo: {reason}",now()))
+    sync_queue(c, "CUSTOMER_ADJUSTMENT", {"customer_id":cid,"delta":applied,"reason":reason,"created_at":now()}); c.commit(); c.close()
+    audit("CUSTOMER_ADJUSTMENT", f"Cliente #{cid}: {'+' if applied>=0 else ''}{applied:.2f} ({reason})")
+    flash("Saldo ajustado.","ok"); return redirect(url_for("customers"))
 
 @app.get("/account/<int:cid>")
 @login_required
@@ -968,11 +988,12 @@ def change_password():
 @perm_required("statistics")
 def statistics():
     c=db()
-    t=request.args.get("date") or date.today().isoformat()
-    totals=c.execute("""SELECT COUNT(*) n,COALESCE(SUM(total),0) total FROM sales WHERE substr(created_at,1,10)=? AND status<>'anulada'""",(t,)).fetchone()
+    d_from,d_to=_period_range()
+    totals=c.execute("""SELECT COUNT(*) n,COALESCE(SUM(total),0) total FROM sales
+                        WHERE substr(created_at,1,10) BETWEEN ? AND ? AND status<>'anulada'""",(d_from,d_to)).fetchone()
     cost=c.execute("""SELECT COALESCE(SUM(si.qty*p.buy_price),0) cost
                       FROM sale_items si JOIN products p ON p.id=si.product_id JOIN sales s ON s.id=si.sale_id
-                      WHERE substr(s.created_at,1,10)=? AND s.status<>'anulada'""",(t,)).fetchone()["cost"]
+                      WHERE substr(s.created_at,1,10) BETWEEN ? AND ? AND s.status<>'anulada'""",(d_from,d_to)).fetchone()["cost"]
     profit=totals["total"]-cost
     markup=(profit/cost*100) if cost else 0
     margin=(profit/totals["total"]*100) if totals["total"] else 0
@@ -980,7 +1001,7 @@ def statistics():
         COALESCE(SUM(CASE WHEN payment='efectivo' THEN total WHEN payment='mixto' THEN payment_cash ELSE 0 END),0) cash,
         COALESCE(SUM(CASE WHEN payment='transferencia' THEN total WHEN payment='mixto' THEN payment_transfer ELSE 0 END),0) transfer,
         COALESCE(SUM(CASE WHEN payment='fiado' THEN total ELSE 0 END),0) credit
-        FROM sales WHERE substr(created_at,1,10)=? AND status<>'anulada'""",(t,)).fetchone()
+        FROM sales WHERE substr(created_at,1,10) BETWEEN ? AND ? AND status<>'anulada'""",(d_from,d_to)).fetchone()
     cash_pct=(payments["cash"]/totals["total"]*100) if totals["total"] else 0
     transfer_pct=(payments["transfer"]/totals["total"]*100) if totals["total"] else 0
     credit_pct=(payments["credit"]/totals["total"]*100) if totals["total"] else 0
@@ -991,8 +1012,17 @@ def statistics():
     stock_sale_value=stock_value["sale_value"]
     stock_potential_profit=stock_sale_value-stock_cost_value
     c.close()
-    return render_template("statistics.html", day=t, totals=totals, cost=cost, profit=profit, markup=markup, margin=margin, payments=payments, cash_pct=cash_pct, transfer_pct=transfer_pct, credit_pct=credit_pct,
+    return render_template("statistics.html", d_from=d_from, d_to=d_to, totals=totals, cost=cost, profit=profit, markup=markup, margin=margin, payments=payments, cash_pct=cash_pct, transfer_pct=transfer_pct, credit_pct=credit_pct,
                             stock_cost_value=stock_cost_value, stock_sale_value=stock_sale_value, stock_potential_profit=stock_potential_profit)
+
+def _period_range():
+    """Lee el período de la URL: from/to (rango) o date (compatibilidad, un solo día). Por
+    defecto, hoy. Si el usuario invierte las fechas, se corrigen solas."""
+    today=date.today().isoformat()
+    d_from=request.args.get("from") or request.args.get("date") or today
+    d_to=request.args.get("to") or request.args.get("date") or today
+    if d_to<d_from: d_from,d_to=d_to,d_from
+    return d_from,d_to
 
 # Reports
 @app.get("/reports")
@@ -1000,19 +1030,26 @@ def statistics():
 @perm_required("reports")
 def reports():
     c=db()
-    t=request.args.get("date") or date.today().isoformat()
-    totals=c.execute("""SELECT COUNT(*) n,COALESCE(SUM(total),0) total FROM sales WHERE substr(created_at,1,10)=? AND status<>'anulada'""",(t,)).fetchone()
+    d_from,d_to=_period_range()
+    totals=c.execute("""SELECT COUNT(*) n,COALESCE(SUM(total),0) total FROM sales
+                        WHERE substr(created_at,1,10) BETWEEN ? AND ? AND status<>'anulada'""",(d_from,d_to)).fetchone()
     cost=c.execute("""SELECT COALESCE(SUM(si.qty*p.buy_price),0) cost
                       FROM sale_items si JOIN products p ON p.id=si.product_id JOIN sales s ON s.id=si.sale_id
-                      WHERE substr(s.created_at,1,10)=? AND s.status<>'anulada'""",(t,)).fetchone()["cost"]
-    payment_rows=c.execute("""SELECT payment,COUNT(*) n,COALESCE(SUM(total),0) total
-                              FROM sales WHERE substr(created_at,1,10)=? AND status<>'anulada' GROUP BY payment""",(t,)).fetchall()
+                      WHERE substr(s.created_at,1,10) BETWEEN ? AND ? AND s.status<>'anulada'""",(d_from,d_to)).fetchone()["cost"]
+    payment_rows=c.execute("""SELECT payment,COUNT(*) n,COALESCE(SUM(total),0) total,
+                              COALESCE(SUM(payment_cash),0) sum_cash,COALESCE(SUM(payment_transfer),0) sum_transfer
+                              FROM sales WHERE substr(created_at,1,10) BETWEEN ? AND ? AND status<>'anulada'
+                              GROUP BY payment""",(d_from,d_to)).fetchall()
+    pending_fiado=c.execute("""SELECT COALESCE(SUM(total),0) t FROM sales
+                               WHERE substr(created_at,1,10) BETWEEN ? AND ? AND status<>'anulada' AND payment='fiado'""",(d_from,d_to)).fetchone()["t"]
+    collected=totals["total"]-pending_fiado
     top=c.execute("""SELECT p.name,SUM(si.qty) qty,SUM(si.subtotal) total
                      FROM sale_items si JOIN products p ON p.id=si.product_id
-                     JOIN sales s ON s.id=si.sale_id WHERE substr(s.created_at,1,10)=? AND s.status<>'anulada'
-                     GROUP BY p.id ORDER BY qty DESC LIMIT 15""",(t,)).fetchall()
+                     JOIN sales s ON s.id=si.sale_id WHERE substr(s.created_at,1,10) BETWEEN ? AND ? AND s.status<>'anulada'
+                     GROUP BY p.id ORDER BY qty DESC LIMIT 15""",(d_from,d_to)).fetchall()
     c.close()
-    return render_template("reports.html", day=t, totals=totals, cost=cost, profit=totals["total"]-cost, payments=payment_rows, top=top)
+    return render_template("reports.html", d_from=d_from, d_to=d_to, totals=totals, cost=cost, profit=totals["total"]-cost,
+                            payments=payment_rows, top=top, pending_fiado=pending_fiado, collected=collected)
 
 # Backup / restore
 @app.get("/backup")
