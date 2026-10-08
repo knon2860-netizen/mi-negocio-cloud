@@ -51,6 +51,34 @@ def db():
 def now():
     return datetime.now().isoformat(timespec="seconds")
 
+# --- Numeración de ventas por rangos (evita choques entre PC y nube al sincronizar) ---
+# PC: 10.000.001 en adelante. Nube (PostgreSQL / DATABASE_URL): 20.000.001 en adelante.
+# Las ventas viejas (1, 2, 3...) se conservan tal cual.
+SALE_ID_SPAN = 10_000_000
+def _sale_id_base():
+    try:
+        v = int(os.environ.get("MI_NEGOCIO_SALE_ID_BASE", "").strip())
+        if v > 0: return v
+    except ValueError:
+        pass
+    return 20_000_000 if os.environ.get("DATABASE_URL", "").strip() else 10_000_000
+SALE_ID_BASE = _sale_id_base()
+
+_ID_TABLES = ("sales", "products", "customers", "suppliers", "purchases", "users")
+
+def next_id(c, table):
+    """Próximo número libre de `table` dentro del rango de ESTE dispositivo (PC: 10.000.001+,
+    nube: 20.000.001+). Ignora los registros que llegaron del otro dispositivo (otro rango), así
+    PC y nube nunca generan el mismo número y la sincronización no pisa ni descarta datos."""
+    if table not in _ID_TABLES: raise ValueError("tabla no permitida: " + str(table))
+    lo = SALE_ID_BASE; hi = lo + SALE_ID_SPAN
+    r = c.execute("SELECT MAX(id) AS m FROM " + table + " WHERE id>? AND id<?", (lo, hi)).fetchone()
+    m = r["m"] if r and r["m"] is not None else lo
+    return int(m) + 1
+
+def next_sale_id(c):
+    return next_id(c, "sales")
+
 def init_db():
     c = db()
     c.executescript("""
@@ -189,40 +217,7 @@ def init_db():
         else:
             c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
                       ("admin", generate_password_hash("admin123"), "admin", 1, now()))
-    apply_id_namespace(c)
     c.commit(); c.close()
-
-# Separa el rango de números que usa cada dispositivo para productos/clientes/proveedores/
-# ventas/compras. Sin esto, la PC y la nube numeran cada una desde 1 por su cuenta, y tarde o
-# temprano generan el MISMO número para cosas distintas (ej. "venta #5" en la PC no tiene nada
-# que ver con "venta #5" en la nube); al sincronizar, el que recibe cree que ya la tiene y la
-# descarta, perdiendo esa venta y el descuento de stock que traía. Se corre una sola vez.
-ID_NAMESPACE_TABLES=("products","customers","suppliers","sales","purchases")
-ID_NAMESPACE_OFFSET=20_000_000   # Nube. La PC usa 10.000.000 (ver app.py de la PC).
-
-def apply_id_namespace(c):
-    if get_setting(c,"id_namespace_v1","")=="1": return
-    if os.environ.get("DATABASE_URL"):
-        for t in ID_NAMESPACE_TABLES:
-            try:
-                c.execute("SAVEPOINT idns_sp")
-                c.execute(f"SELECT setval(pg_get_serial_sequence('{t}','id'), GREATEST({ID_NAMESPACE_OFFSET},(SELECT COALESCE(MAX(id),0) FROM {t})), true)")
-                c.execute("RELEASE SAVEPOINT idns_sp")
-            except Exception:
-                try:
-                    c.execute("ROLLBACK TO SAVEPOINT idns_sp"); c.execute("RELEASE SAVEPOINT idns_sp")
-                except Exception:
-                    pass
-    else:
-        # Solo para pruebas locales en sqlite sin Postgres.
-        for t in ID_NAMESPACE_TABLES:
-            row=c.execute("SELECT seq FROM sqlite_sequence WHERE name=?",(t,)).fetchone()
-            if row:
-                if row["seq"]<ID_NAMESPACE_OFFSET:
-                    c.execute("UPDATE sqlite_sequence SET seq=? WHERE name=?",(ID_NAMESPACE_OFFSET,t))
-            else:
-                c.execute("INSERT INTO sqlite_sequence(name,seq) VALUES(?,?)",(t,ID_NAMESPACE_OFFSET))
-    set_setting(c,"id_namespace_v1","1")
 
 def sync_queue(c, op_type, payload):
     import uuid
@@ -413,10 +408,10 @@ def products():
                 c.execute("UPDATE products SET name=?,category=?,buy_price=?,sell_price=?,stock=?,min_stock=?,fractional=?,active=1 WHERE id=?", values + (pid,))
                 new_id=pid
             else:
-                c.execute("""INSERT INTO products(barcode,name,category,buy_price,sell_price,stock,min_stock,fractional)
-                             VALUES(?,?,?,?,?,?,?,?)""",
-                          (barcode,)+values)
-                new_id=c.execute("SELECT last_insert_rowid()").fetchone()[0]
+                new_id=next_id(c,"products")
+                c.execute("""INSERT INTO products(id,barcode,name,category,buy_price,sell_price,stock,min_stock,fractional)
+                             VALUES(?,?,?,?,?,?,?,?,?)""",
+                          (new_id,barcode)+values)
             c.commit()
             sync_queue(c, "PRODUCT_UPSERT", {"id": new_id, "barcode": barcode or "", "name": values[0], "category": values[1], "buy_price": values[2], "sell_price": values[3], "stock": values[4], "min_stock": values[5], "fractional": values[6], "active": 1})
             c.commit(); audit("PRODUCT_CREATE", values[0]); flash("Producto agregado.","ok")
@@ -506,9 +501,10 @@ def customers():
     c=db()
     if request.method=="POST":
         d=request.form
-        c.execute("INSERT INTO customers(name,phone,address) VALUES(?,?,?)",
-                  (d["name"].strip(),d.get("phone","").strip(),d.get("address","").strip()))
-        c.commit(); row=c.execute("SELECT * FROM customers WHERE id=last_insert_rowid()").fetchone(); sync_queue(c, "CUSTOMER_UPSERT", dict(row) if row else {}); c.commit(); c.close(); audit("CUSTOMER_CREATE", d["name"].strip()); flash("Cliente agregado.","ok")
+        new_cid=next_id(c,"customers")
+        c.execute("INSERT INTO customers(id,name,phone,address) VALUES(?,?,?,?)",
+                  (new_cid,d["name"].strip(),d.get("phone","").strip(),d.get("address","").strip()))
+        c.commit(); row=c.execute("SELECT * FROM customers WHERE id=?",(new_cid,)).fetchone(); sync_queue(c, "CUSTOMER_UPSERT", dict(row) if row else {}); c.commit(); c.close(); audit("CUSTOMER_CREATE", d["name"].strip()); flash("Cliente agregado.","ok")
         return redirect(url_for("customers"))
     rows=c.execute("SELECT * FROM customers WHERE active=1 ORDER BY name").fetchall()
     c.close()
@@ -533,6 +529,24 @@ def payment(cid):
     sync_queue(c, "CUSTOMER_PAYMENT", {"customer_id":cid,"amount":amount,"created_at":now()}); c.commit(); c.close()
     audit("CUSTOMER_PAYMENT", f"Cliente #{cid}: ${amount:.2f}")
     flash("Pago registrado.","ok"); return redirect(url_for("customers"))
+
+@app.post("/customers/<int:cid>/delete")
+@login_required
+@admin_required
+def delete_customer(cid):
+    """Elimina un cliente de la lista (baja lógica: active=0). El historial de ventas y de cuenta
+    se conserva. No se permite si el cliente tiene saldo pendiente. El cambio se sincroniza."""
+    c=db(); cust=c.execute("SELECT * FROM customers WHERE id=? AND active=1",(cid,)).fetchone()
+    if not cust: c.close(); flash("Cliente inexistente.","error"); return redirect(url_for("customers"))
+    if (cust["balance"] or 0)>0.009:
+        c.close(); flash(f"No se puede eliminar a {cust['name']}: tiene un saldo pendiente de $ {cust['balance']:.2f}. Primero registrá el pago o ajustá el saldo.","error")
+        return redirect(url_for("customers"))
+    c.execute("UPDATE customers SET active=0 WHERE id=?",(cid,))
+    row=c.execute("SELECT * FROM customers WHERE id=?",(cid,)).fetchone()
+    sync_queue(c, "CUSTOMER_UPSERT", dict(row)); c.commit(); c.close()
+    audit("CUSTOMER_DELETE", f"Cliente #{cid}: {cust['name']}")
+    flash(f"Cliente «{cust['name']}» eliminado. Su historial de ventas se conserva.","ok")
+    return redirect(url_for("customers"))
 
 @app.post("/customers/<int:cid>/adjust-balance")
 @login_required
@@ -641,11 +655,14 @@ def new_sale():
                 if not cust: raise ValueError("Cliente inválido.")
             if payment_type=="mixto" and abs((pay_cash+pay_transfer)-total) > 0.01:
                 raise ValueError(f"Los montos del pago mixto (${pay_cash:.2f} + ${pay_transfer:.2f}) no suman el total de la venta (${total:.2f}).")
-            cur=c.execute("""INSERT INTO sales(user_id,customer_id,cash_session_id,total,payment,created_at,status,payment_cash,payment_transfer)
-                             VALUES(?,?,?,?,?,?,?,?,?)""",
-                          (session["user_id"],cid,cash["id"] if (payment_type=="efectivo" or (payment_type=="mixto" and pay_cash>0)) and cash else None,
-                           total,payment_type,now(),"valida",pay_cash,pay_transfer))
-            sid=cur.lastrowid
+            # El número de venta se asigna explícitamente dentro del rango propio de este
+            # dispositivo (PC: desde 10.000.001, nube: desde 20.000.001), para que PC y nube
+            # nunca generen el mismo número y la sincronización no descarte ventas.
+            sid=next_sale_id(c)
+            c.execute("""INSERT INTO sales(id,user_id,customer_id,cash_session_id,total,payment,created_at,status,payment_cash,payment_transfer)
+                         VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                      (sid,session["user_id"],cid,cash["id"] if (payment_type=="efectivo" or (payment_type=="mixto" and pay_cash>0)) and cash else None,
+                       total,payment_type,now(),"valida",pay_cash,pay_transfer))
             for p,qty,unit_price,subtotal in validated:
                 c.execute("""INSERT INTO sale_items(sale_id,product_id,qty,unit_price,subtotal)
                              VALUES(?,?,?,?,?)""",(sid,p["id"],qty,unit_price,subtotal))
@@ -783,8 +800,9 @@ def suppliers():
     c=db()
     if request.method=="POST":
         d=request.form
-        c.execute("INSERT INTO suppliers(name,phone,notes) VALUES(?,?,?)",(d["name"].strip(),d.get("phone",""),d.get("notes","")))
-        c.commit(); row=c.execute("SELECT * FROM suppliers WHERE id=last_insert_rowid()").fetchone(); sync_queue(c, "SUPPLIER_UPSERT", dict(row) if row else {}); c.commit(); c.close(); audit("SUPPLIER_CREATE",d["name"].strip()); flash("Proveedor agregado.","ok")
+        new_sid=next_id(c,"suppliers")
+        c.execute("INSERT INTO suppliers(id,name,phone,notes) VALUES(?,?,?,?)",(new_sid,d["name"].strip(),d.get("phone",""),d.get("notes","")))
+        c.commit(); row=c.execute("SELECT * FROM suppliers WHERE id=?",(new_sid,)).fetchone(); sync_queue(c, "SUPPLIER_UPSERT", dict(row) if row else {}); c.commit(); c.close(); audit("SUPPLIER_CREATE",d["name"].strip()); flash("Proveedor agregado.","ok")
         return redirect(url_for("suppliers"))
     rows=c.execute("SELECT * FROM suppliers WHERE active=1 ORDER BY name").fetchall()
     c.close(); return render_template("suppliers.html", suppliers=rows)
@@ -807,9 +825,9 @@ def purchases():
                 qty=float(item["qty"]); cost=float(item["cost"])
                 if not p or qty<=0 or cost<0: raise ValueError("Producto, cantidad o costo inválido.")
                 sub=round(qty*cost,2); total+=sub; validated.append((p,qty,cost,sub))
-            cur=c.execute("INSERT INTO purchases(supplier_id,user_id,total,created_at) VALUES(?,?,?,?)",
-                          (sid,session["user_id"],total,now()))
-            pid=cur.lastrowid
+            pid=next_id(c,"purchases")
+            c.execute("INSERT INTO purchases(id,supplier_id,user_id,total,created_at) VALUES(?,?,?,?,?)",
+                      (pid,sid,session["user_id"],total,now()))
             for p,qty,cost,sub in validated:
                 c.execute("""INSERT INTO purchase_items(purchase_id,product_id,qty,unit_cost,subtotal)
                              VALUES(?,?,?,?,?)""",(pid,p["id"],qty,cost,sub))
@@ -894,9 +912,10 @@ def employees():
     if request.method=="POST":
         d=request.form
         try:
-            cur=c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
-                      (d["username"].strip(),generate_password_hash(d["password"]),"employee",1,now()))
-            row=c.execute("SELECT * FROM users WHERE id=?",(cur.lastrowid,)).fetchone()
+            new_uid=next_id(c,"users")
+            c.execute("INSERT INTO users(id,username,password,role,active,created_at) VALUES(?,?,?,?,?,?)",
+                      (new_uid,d["username"].strip(),generate_password_hash(d["password"]),"employee",1,now()))
+            row=c.execute("SELECT * FROM users WHERE id=?",(new_uid,)).fetchone()
             sync_queue(c,"USER_UPSERT",dict(row))
             c.commit(); audit("EMPLOYEE_CREATE",d["username"].strip()); flash("Empleado creado.","ok")
         except sqlite3.IntegrityError: c.rollback(); flash("Ese usuario ya existe.","error")
