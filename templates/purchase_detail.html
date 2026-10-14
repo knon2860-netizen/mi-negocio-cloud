@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><div><h1>Compra #{{pu.id}}</h1><p class="muted">{{pu.created_at}} · Proveedor: <b>{{pu.supplier}}</b> · Cargada por {{pu.username}}</p></div>
+<div class="actions"><a class="btn small" href="/purchases">← Volver a compras</a><button class="small" type="button" onclick="window.print()">🖨️ Imprimir</button></div></div>
+<div class="card"><h2>Productos ingresados en esta compra</h2>
+<div class="tablewrap"><table><tr><th>Producto</th><th>Código</th><th>Cantidad</th><th>Costo unitario</th><th>Subtotal</th></tr>
+{% for i in items %}<tr><td><b>{{i.name}}</b></td><td>{{i.barcode or '-'}}</td><td>{{ ('%.2f'|format(i.qty)).rstrip('0').rstrip('.') }}</td><td>$ {{i.unit_cost|ars}}</td><td>$ {{i.subtotal|ars}}</td></tr>{% endfor %}
+{% if not items %}<tr><td colspan="5" class="muted">Esta compra no tiene productos registrados.</td></tr>{% endif %}
+</table></div>
+<div class="totalline"><span>Total de la compra ({{items|length}} producto(s))</span><strong>$ {{pu.total|ars}}</strong></div></div>
+{% endblock %}

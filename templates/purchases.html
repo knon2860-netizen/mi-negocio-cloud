@@ -48,7 +48,15 @@
   </div>
 </div>
 
-<div class="card"><h2>Compras recientes</h2><div class="tablewrap"><table><tr><th>#</th><th>Fecha</th><th>Proveedor</th><th>Usuario</th><th>Total</th></tr>{% for p in purchases %}<tr><td>#{{p.id}}</td><td>{{p.created_at}}</td><td>{{p.supplier}}</td><td>{{p.username}}</td><td>$ {{p.total|ars}}</td></tr>{% endfor %}</table></div></div>
+<div class="card"><h2>Historial de compras</h2>
+<form class="toolbar" method="get" action="/purchases">
+<label>Desde <input type="date" name="from" value="{{f_from}}"></label>
+<label>Hasta <input type="date" name="to" value="{{f_to}}"></label>
+<label>Proveedor <select name="supplier"><option value="">Todos</option><option value="none" {% if f_supplier=='none' %}selected{% endif %}>Sin proveedor</option>{% for s in suppliers %}<option value="{{s.id}}" {% if f_supplier==(s.id|string) %}selected{% endif %}>{{s.name}}</option>{% endfor %}</select></label>
+<button>Buscar</button> <a class="btn small" href="/purchases">Limpiar</a>
+</form>
+<p class="muted">{% if filtered %}{{purchases|length}} compra(s) encontradas · Total comprado: <b>$ {{sum_total|ars}}</b>{% else %}Se muestran las últimas {{purchases|length}} compras. Usá los filtros para buscar por fecha o proveedor.{% endif %}</p>
+<div class="tablewrap"><table><tr><th>#</th><th>Fecha</th><th>Proveedor</th><th>Productos</th><th>Usuario</th><th>Total</th><th></th></tr>{% for p in purchases %}<tr><td>#{{p.id}}</td><td>{{p.created_at}}</td><td>{{p.supplier}}</td><td>{{p.n_items}}</td><td>{{p.username}}</td><td>$ {{p.total|ars}}</td><td><a class="btn small" href="/purchases/{{p.id}}">Ver detalle</a></td></tr>{% endfor %}{% if not purchases %}<tr><td colspan="7" class="muted">No hay compras para mostrar.</td></tr>{% endif %}</table></div></div>
 
 <script>
 let pcart=[];
