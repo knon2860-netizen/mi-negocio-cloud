@@ -61,6 +61,7 @@ def enabled():
 def ensure_tables(c):
     c.execute("CREATE TABLE IF NOT EXISTS sync_outbox(op_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, synced INTEGER DEFAULT 0)")
     c.execute("CREATE TABLE IF NOT EXISTS sync_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    c.execute("CREATE TABLE IF NOT EXISTS sync_conflicts(cid TEXT PRIMARY KEY, created_at TEXT NOT NULL, op_id TEXT, device_id TEXT, type TEXT, kind TEXT, detail TEXT)")
     c.commit()
 
 
@@ -178,8 +179,8 @@ def _sync_once_locked():
             for oid in data.get("accepted", []):
                 c.execute("UPDATE sync_outbox SET synced=1 WHERE op_id=?", (oid,))
             if data.get("rejected"):
-                c.commit(); c.close()
-                return {"ok": False, "configured": True, "message": "El servidor rechazó una o más operaciones.", "pending": pending_count()}
+                # Antes un rechazo cortaba la sincronización y no se traía nada del otro dispositivo.
+                _log("el servidor rechazó %d operación(es); se sigue con la descarga" % len(data.get("rejected")))
         else:
             data = {"accepted": []}
 
@@ -195,10 +196,11 @@ def _sync_once_locked():
         _log("traídas %d operaciones (desde cursor %s)" % (len(pdata.get("ops", [])), cur))
 
         # cloud_launcher exposes apply_op for the central PostgreSQL-backed app.
-        from cloud_launcher import apply_op, fix_sequences
+        from cloud_launcher import apply_op, fix_sequences, CONFLICTS, _conflict, flush_conflicts
         applied = 0
         skipped = 0
         for op in pdata.get("ops", []):
+            n0 = len(CONFLICTS)
             # SAVEPOINT por operación: en PostgreSQL un solo error aborta toda la transacción.
             # Así una operación con conflicto se descarta sola y el resto sigue aplicándose.
             c.execute("SAVEPOINT op_sp")
@@ -210,6 +212,9 @@ def _sync_once_locked():
                 _log("operación omitida %s (%s): %r" % (op.get("op_id"), op.get("type"), str(e)[:200]))
                 c.execute("ROLLBACK TO SAVEPOINT op_sp")
                 c.execute("RELEASE SAVEPOINT op_sp")
+                del CONFLICTS[n0:]
+                _conflict(op, "error", "%s: %s" % (type(e).__name__, e))
+            flush_conflicts(c)
         fix_sequences(c)
 
         next_cur = int(pdata.get("next_cursor", cur))

@@ -1,11 +1,4 @@
-import os,re,sqlite3,json,time
-
-# Hora de Argentina (UTC-3) para TODO el programa en la nube. Render trabaja en UTC y mostraba
-# las horas (ventas, caja, sincronización) 3 horas adelantadas. "ART3" es el formato POSIX y no
-# necesita base de zonas horarias. Si en Render ya existe una TZ distinta de UTC, se respeta.
-if os.environ.get('TZ','').strip() in ('','UTC','Etc/UTC','GMT','Z'): os.environ['TZ']='ART3'
-try: time.tzset()
-except AttributeError: pass
+import os,re,sqlite3,json
 
 DATABASE_URL=os.environ.get('DATABASE_URL','').strip()
 SYNC_KEY=os.environ.get('MI_NEGOCIO_SYNC_KEY','').strip()
@@ -104,6 +97,43 @@ init_db()
 VALID_OPS={'PRODUCT_UPSERT','CUSTOMER_UPSERT','SUPPLIER_UPSERT','SALE','SALE_CANCEL','PURCHASE','CUSTOMER_PAYMENT','CUSTOMER_ADJUSTMENT','CASH_MOVEMENT','STOCK_ADJUSTMENT','AUDIT','USER_UPSERT','USER_DELETE'}
 def key_ok(req): return bool(SYNC_KEY) and req.headers.get('X-MiNegocio-Key','')==SYNC_KEY
 
+# Conflictos detectados al aplicar operaciones recibidas (número repetido, producto inexistente,
+# errores). Se juntan en memoria y los guarda el bucle de sincronización en sync_conflicts.
+CONFLICTS=[]
+def _conflict(op, kind, detail):
+    CONFLICTS.append((op.get('op_id'), str(op.get('device_id') or ''), str(op.get('type') or ''), kind, str(detail)[:500]))
+
+def flush_conflicts(c):
+    import uuid as _uuid, datetime as _dt
+    while CONFLICTS:
+        op_id,dev,typ,kind,detail=CONFLICTS.pop(0)
+        try:
+            c.execute('INSERT INTO sync_conflicts(cid,created_at,op_id,device_id,type,kind,detail) VALUES(?,?,?,?,?,?,?)',
+                      (_uuid.uuid4().hex,_dt.datetime.now().isoformat(timespec='seconds'),op_id,dev,typ,kind,detail))
+        except Exception:
+            pass
+
+def _items_summary(items):
+    return ', '.join(f"{it.get('barcode') or ('id '+str(it.get('product_id')))} x{it.get('qty')}" for it in (items or [])[:8])
+
+def _product_id(c, item):
+    """Id LOCAL del producto al que se refiere un ítem recibido. Prefiere el id, pero si el código de
+    barras del ítem no coincide con el del producto que tiene ese id acá (mismo número usado para
+    productos distintos en cada dispositivo), usa el código de barras."""
+    try: pid=int(item.get('product_id') or 0)
+    except Exception: pid=0
+    barcode=str(item.get('barcode') or '').strip()
+    by_id=c.execute('SELECT id,barcode FROM products WHERE id=?',(pid,)).fetchone() if pid else None
+    if by_id:
+        local_bc=str(by_id[1] or '').strip()
+        if not barcode or not local_bc or barcode==local_bc: return int(by_id[0])
+        row=c.execute('SELECT id FROM products WHERE barcode=?',(barcode,)).fetchone()
+        return int(row[0]) if row else int(by_id[0])
+    if barcode:
+        row=c.execute('SELECT id FROM products WHERE barcode=?',(barcode,)).fetchone()
+        if row: return int(row[0])
+    return 0
+
 def apply_op(c,op):
     oid=op.get('op_id'); typ=op.get('type'); p=op.get('payload') or {}
     if not oid or typ not in VALID_OPS: return False
@@ -127,6 +157,9 @@ def apply_op(c,op):
                 if dup and int(dup['id'])!=pid:
                     c.execute('UPDATE products SET barcode=NULL WHERE id=?',(int(dup['id']),))
             c.execute('''INSERT INTO products(id,barcode,name,category,buy_price,sell_price,stock,min_stock,fractional,active) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET barcode=excluded.barcode,name=excluded.name,category=excluded.category,buy_price=excluded.buy_price,sell_price=excluded.sell_price,min_stock=excluded.min_stock,fractional=excluded.fractional,active=excluded.active''',(pid,barcode)+tuple(p.get(x) for x in ['name','category','buy_price','sell_price','stock','min_stock','fractional','active']))
+            # Alta/re-alta con stock inicial explícito: se pisa el stock (el upsert común no lo toca).
+            if p.get('stock_set') and p.get('stock') is not None:
+                c.execute('UPDATE products SET stock=? WHERE id=?',(float(p['stock']),pid))
     elif typ=='CUSTOMER_UPSERT':
         if not p.get('id') or not p.get('name'): return False
         c.execute('''INSERT INTO customers(id,name,phone,address,balance,active) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,phone=excluded.phone,address=excluded.address,active=excluded.active''',tuple(p.get(x) for x in ['id','name','phone','address','balance','active']))
@@ -136,15 +169,11 @@ def apply_op(c,op):
     elif typ=='SALE':
         sid=int(p.get('sale_id') or 0); items=p.get('items') or []
         if not sid: return False
-        ex=c.execute('SELECT total,created_at FROM sales WHERE id=?',(sid,)).fetchone()
+        ex=c.execute('SELECT total FROM sales WHERE id=?',(sid,)).fetchone()
         if ex:
-            try: same=abs(float(ex['total'] or 0)-float(p.get('total') or 0))<0.01 and str(ex['created_at'] or '')[:19]==str(p.get('created_at') or '')[:19]
-            except (TypeError,ValueError): same=False
-            if same: return False   # duplicado real: ya estaba
-            # Número repetido pero es OTRA venta (numeración vieja): NO se descarta; se guarda con
-            # un número nuevo del rango de la nube y se recuerda la equivalencia.
-            old_sid=sid; sid=__import__('app').next_sale_id(c)
-            c.execute('INSERT INTO sale_id_map(remote_id,local_id) VALUES(?,?) ON CONFLICT(remote_id) DO UPDATE SET local_id=excluded.local_id',(old_sid,sid))
+            if abs(float(ex[0] or 0)-float(p.get('total') or 0))>0.005:
+                _conflict(op,'id_repetido',f"La venta #{sid} que llegó de {op.get('device_id')} (${float(p.get('total') or 0):.2f}, {p.get('created_at')}) NO se aplicó: acá ya existe una venta #{sid} distinta (${float(ex[0] or 0):.2f}). Hay que revisar el stock de: {_items_summary(items)}")
+            return False
         uid=int(p.get('user_id') or 1); cid=p.get('customer_id'); cid=int(cid) if cid and c.execute('SELECT 1 FROM customers WHERE id=?',(int(cid),)).fetchone() else None; pay=str(p.get('payment') or 'efectivo')
         pay_cash=float(p.get('payment_cash') or 0); pay_transfer=float(p.get('payment_transfer') or 0)
         cash=None
@@ -153,8 +182,10 @@ def apply_op(c,op):
         c.execute('INSERT INTO sales(id,user_id,customer_id,cash_session_id,total,payment,created_at,payment_cash,payment_transfer) VALUES(?,?,?,?,?,?,?,?,?)',
                   (sid,uid,cid,cash['id'] if cash else None,float(p.get('total') or 0),pay,p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds'),pay_cash,pay_transfer))
         for it in items:
-            pid=int(it.get('product_id') or 0)
-            if not pid: continue
+            pid=_product_id(c,it)
+            if not pid:
+                _conflict(op,'producto_no_encontrado',f"Venta #{sid} de {op.get('device_id')}: el producto {it.get('barcode') or ('id '+str(it.get('product_id')))} x{it.get('qty')} no existe acá; no se descontó su stock.")
+                continue
             qty=float(it.get('qty') or 0); price=float(it.get('unit_price') or 0); sub=float(it.get('subtotal') or qty*price); c.execute('INSERT INTO sale_items(sale_id,product_id,qty,unit_price,subtotal) VALUES(?,?,?,?,?)',(sid,pid,qty,price,sub)); c.execute('UPDATE products SET stock=stock-? WHERE id=?',(qty,pid))
         if pay=='fiado' and cid:
             total=float(p.get('total') or 0); c.execute('UPDATE customers SET balance=balance+? WHERE id=?',(total,cid)); c.execute('INSERT INTO account_movements(customer_id,sale_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',(cid,sid,'sale',total,f'Venta fiada #{sid}',p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
@@ -165,8 +196,6 @@ def apply_op(c,op):
     elif typ=='SALE_CANCEL':
         sid=int(p.get('sale_id') or 0)
         if not sid: return False
-        mp=c.execute('SELECT local_id FROM sale_id_map WHERE remote_id=?',(sid,)).fetchone()
-        if mp: sid=int(mp['local_id'])
         s=c.execute('SELECT * FROM sales WHERE id=?',(sid,)).fetchone()
         if not s: return False   # la venta todavía no llegó; se reintenta en otra vuelta
         if (s['status'] or 'valida')=='anulada': return False
@@ -207,12 +236,19 @@ def apply_op(c,op):
         c.execute("DELETE FROM users WHERE id=? AND role='employee'",(uid,))
     elif typ=='PURCHASE':
         pid=int(p.get('purchase_id') or 0); items=p.get('items') or []
-        if not pid or c.execute('SELECT 1 FROM purchases WHERE id=?',(pid,)).fetchone(): return False
+        if not pid: return False
+        ex=c.execute('SELECT total FROM purchases WHERE id=?',(pid,)).fetchone()
+        if ex:
+            if abs(float(ex[0] or 0)-float(p.get('total') or 0))>0.005:
+                _conflict(op,'id_repetido',f"La compra #{pid} que llegó de {op.get('device_id')} (${float(p.get('total') or 0):.2f}, {p.get('created_at')}) NO se aplicó: acá ya existe una compra #{pid} distinta (${float(ex[0] or 0):.2f}). Hay que revisar el stock de: {_items_summary(items)}")
+            return False
         sup=p.get('supplier_id'); sup=int(sup) if sup and c.execute('SELECT 1 FROM suppliers WHERE id=?',(int(sup),)).fetchone() else None; uid=int(p.get('user_id') or 1)
         c.execute('INSERT INTO purchases(id,supplier_id,user_id,total,created_at) VALUES(?,?,?,?,?)',(pid,sup,uid,float(p.get('total') or 0),p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
         for it in items:
-            prod=int(it.get('product_id') or 0)
-            if not prod: continue
+            prod=_product_id(c,it)
+            if not prod:
+                _conflict(op,'producto_no_encontrado',f"Compra #{pid} de {op.get('device_id')}: el producto {it.get('barcode') or ('id '+str(it.get('product_id')))} x{it.get('qty')} no existe acá; no se sumó su stock.")
+                continue
             qty=float(it.get('qty') or 0); cost=float(it.get('unit_cost') or 0); sub=float(it.get('subtotal') or qty*cost); c.execute('INSERT INTO purchase_items(purchase_id,product_id,qty,unit_cost,subtotal) VALUES(?,?,?,?,?)',(pid,prod,qty,cost,sub)); c.execute('UPDATE products SET stock=stock+?,buy_price=? WHERE id=?',(qty,cost,prod))
     elif typ=='CUSTOMER_PAYMENT':
         cid=int(p.get('customer_id') or 0); amount=float(p.get('amount') or 0)
@@ -233,22 +269,55 @@ def apply_op(c,op):
         if not cash or amount==0: return False
         c.execute('INSERT INTO cash_movements(session_id,user_id,type,amount,note,created_at) VALUES(?,?,?,?,?,?)',(cash['id'],int(p.get('user_id') or 1),str(p.get('type') or 'manual'),amount,str(p.get('note') or 'Movimiento sincronizado'),p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
     elif typ=='STOCK_ADJUSTMENT':
-        pid=int(p.get('product_id') or 0); qty=float(p.get('qty') or 0); row=c.execute('SELECT stock FROM products WHERE id=?',(pid,)).fetchone()
-        if not pid or qty==0 or not row: return False
-        before=float(row['stock'] or 0); after=before+qty; c.execute('UPDATE products SET stock=? WHERE id=?',(after,pid)); c.execute('INSERT INTO stock_movements(op_id,product_id,qty,reason,note,user_id,device_id,created_at,stock_before,stock_after) VALUES(?,?,?,?,?,?,?,?,?,?)',(oid,pid,qty,str(p.get('reason') or 'otro'),str(p.get('note') or ''),int(p.get('user_id') or 1),str(p.get('device_id') or op.get('device_id') or ''),p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds'),before,after))
+        pid=_product_id(c,p); qty=float(p.get('qty') or 0); set_to=p.get('set_to')
+        row=c.execute('SELECT stock FROM products WHERE id=?',(pid,)).fetchone() if pid else None
+        if not pid or not row or (qty==0 and set_to is None): return False
+        before=float(row['stock'] or 0)
+        if set_to is not None:
+            # Conteo físico: el valor ABSOLUTO manda, sin importar cuánto tenía este dispositivo.
+            after=float(set_to); qty=after-before
+        else:
+            after=before+qty
+        if qty!=0:
+            c.execute('UPDATE products SET stock=? WHERE id=?',(after,pid))
+            c.execute('INSERT INTO stock_movements(op_id,product_id,qty,reason,note,user_id,device_id,created_at,stock_before,stock_after) VALUES(?,?,?,?,?,?,?,?,?,?)',(oid,pid,qty,str(p.get('reason') or 'otro'),str(p.get('note') or ''),int(p.get('user_id') or 1),str(p.get('device_id') or op.get('device_id') or ''),p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds'),before,after))
     elif typ=='AUDIT': c.execute('INSERT INTO audit_log(user_id,action,detail,created_at) VALUES(?,?,?,?)',(int(p.get('user_id') or 1),str(p.get('action') or 'SYNC'),str(p.get('detail') or ''),p.get('created_at') or __import__('datetime').datetime.now().isoformat(timespec='seconds')))
     c.execute('INSERT INTO applied_operations(op_id,applied_at) VALUES(?,?) ON CONFLICT(op_id) DO NOTHING',(oid,__import__('datetime').datetime.now().isoformat(timespec='seconds'))); return True
 
 SEQ_TABLES=('users','products','customers','suppliers','purchases','purchase_items','sales','sale_items','account_movements','cash_sessions','cash_movements','audit_log','stock_movements')
+NAMESPACE_TABLES=('products','customers','suppliers','sales','purchases')
+NAMESPACE_FLOOR=20_000_000     # rango propio de la nube (la PC usa 10.000.000)
+
+def _seq_target(consumed, max_id, floor=0):
+    """A qué valor hay que llevar un contador (valor ya consumido) o None si no hay que tocarlo.
+    NUNCA retrocede: antes se lo llevaba siempre al máximo id de la tabla, y eso lo rebobinaba del
+    rango de la nube al de la PC, volviendo a generar números repetidos entre dispositivos."""
+    t=max(int(consumed or 0), int(max_id or 0), int(floor or 0))
+    return t if t>int(consumed or 0) else None
+
 def fix_sequences(c):
     """Las filas que llegan de la PC traen id propio y no avanzan los contadores de PostgreSQL.
-    Se adelantan al máximo id existente para que un producto/venta creado en la nube no reciba
-    un id que ya existe (eso daba errores de 'ya existe')."""
+    Se adelantan (sólo hacia adelante) para que un registro creado en la nube no reciba un id que
+    ya existe, y se garantiza el piso del rango propio de la nube en las tablas con numeración
+    separada."""
     if not DATABASE_URL: return
     for t in SEQ_TABLES:
         try:
             c.execute("SAVEPOINT seqfix_sp")
-            c.execute(f"SELECT setval(pg_get_serial_sequence('{t}','id'), COALESCE((SELECT MAX(id) FROM {t}),1), (SELECT MAX(id) FROM {t}) IS NOT NULL)")
+            sr=c.execute(f"SELECT pg_get_serial_sequence('{t}','id') AS s").fetchone()
+            name=sr['s'] if sr else None
+            if name:
+                st=c.execute(f"SELECT last_value, is_called FROM {name}").fetchone()
+                consumed=int(st['last_value']) if st['is_called'] else int(st['last_value'])-1
+                if t in NAMESPACE_TABLES:
+                    mx=c.execute(f"SELECT COALESCE(MAX(id),0) m FROM {t} WHERE id>? AND id<=?",(NAMESPACE_FLOOR,NAMESPACE_FLOOR+9_999_999)).fetchone()['m']
+                    floor=NAMESPACE_FLOOR
+                else:
+                    mx=c.execute(f"SELECT COALESCE(MAX(id),0) m FROM {t}").fetchone()['m']
+                    floor=0
+                tgt=_seq_target(consumed,mx,floor)
+                if tgt is not None:
+                    c.execute(f"SELECT setval('{name}', {int(tgt)}, true)")
             c.execute("RELEASE SAVEPOINT seqfix_sp")
         except Exception:
             try: c.execute("ROLLBACK TO SAVEPOINT seqfix_sp"); c.execute("RELEASE SAVEPOINT seqfix_sp")
@@ -256,7 +325,6 @@ def fix_sequences(c):
 
 # Ensure central sync tables exist after app schema.
 conn=__import__('app').db()
-conn.execute('''CREATE TABLE IF NOT EXISTS sale_id_map(remote_id BIGINT PRIMARY KEY, local_id BIGINT NOT NULL)''')
 if DATABASE_URL:
     conn.execute('''CREATE TABLE IF NOT EXISTS operations(seq BIGSERIAL PRIMARY KEY,op_id TEXT UNIQUE NOT NULL,device_id TEXT NOT NULL,type TEXT NOT NULL,payload TEXT NOT NULL,created_at TEXT NOT NULL,received_at TEXT NOT NULL)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS applied_operations(op_id TEXT PRIMARY KEY,applied_at TEXT NOT NULL)''')

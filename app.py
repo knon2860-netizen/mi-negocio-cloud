@@ -200,6 +200,16 @@ def init_db():
 ID_NAMESPACE_TABLES=("products","customers","suppliers","sales","purchases")
 ID_NAMESPACE_OFFSET=20_000_000   # Nube. La PC usa 10.000.000 (ver app.py de la PC).
 
+def next_local_id(c, table):
+    """Número para un registro nuevo creado en ESTE dispositivo. Siempre cae dentro de su rango
+    exclusivo [OFFSET+1 .. OFFSET+9.999.999], sin depender de los contadores automáticos del motor
+    de base de datos (esos se "contaminan": al recibir una fila con número alto del otro
+    dispositivo, el contador salta a su rango, y los números vuelven a poder repetirse)."""
+    lo=ID_NAMESPACE_OFFSET; hi=lo+9_999_999
+    row=c.execute(f"SELECT MAX(id) m FROM {table} WHERE id>? AND id<=?",(lo,hi)).fetchone()
+    m=(row["m"] if row else None) or 0
+    return (m if m>lo else lo)+1
+
 def apply_id_namespace(c):
     if get_setting(c,"id_namespace_v1","")=="1": return
     if os.environ.get("DATABASE_URL"):
@@ -231,6 +241,18 @@ def sync_queue(c, op_type, payload):
     c.execute("INSERT INTO sync_outbox(op_id,device_id,type,payload,created_at,synced) VALUES(?,?,?,?,?,?)",
               (op_id, device_id, op_type, json.dumps(payload, ensure_ascii=False), now(), 0))
     return op_id
+
+def sync_conflicts_data():
+    """Operaciones recibidas que no se pudieron aplicar (número repetido, producto inexistente, error)."""
+    try:
+        c=db()
+        c.execute("CREATE TABLE IF NOT EXISTS sync_conflicts(cid TEXT PRIMARY KEY, created_at TEXT NOT NULL, op_id TEXT, device_id TEXT, type TEXT, kind TEXT, detail TEXT)")
+        c.commit()
+        n=c.execute("SELECT COUNT(*) FROM sync_conflicts").fetchone()[0]
+        rows=c.execute("SELECT created_at,kind,detail FROM sync_conflicts ORDER BY created_at DESC LIMIT 30").fetchall()
+        c.close(); return int(n), rows
+    except Exception:
+        return 0, []
 
 def sync_status_data():
     try:
@@ -388,7 +410,8 @@ def dashboard():
                        JOIN sales s ON s.id=si.sale_id WHERE substr(s.created_at,1,10)=? AND s.status<>'anulada'""",(t,)).fetchone()[0]
     cash=open_cash(c)
     c.close()
-    return render_template("dashboard.html", sales_today=sales_today, low=low, negative=negative, debt=debt, profit=profit, cash=cash)
+    sync_conflicts_n=sync_conflicts_data()[0] if session.get("role")=="admin" else 0
+    return render_template("dashboard.html", sales_today=sales_today, low=low, negative=negative, debt=debt, profit=profit, cash=cash, sync_conflicts_n=sync_conflicts_n)
 
 # Products / stock
 @app.route("/products", methods=["GET","POST"])
@@ -413,12 +436,12 @@ def products():
                 c.execute("UPDATE products SET name=?,category=?,buy_price=?,sell_price=?,stock=?,min_stock=?,fractional=?,active=1 WHERE id=?", values + (pid,))
                 new_id=pid
             else:
-                c.execute("""INSERT INTO products(barcode,name,category,buy_price,sell_price,stock,min_stock,fractional)
-                             VALUES(?,?,?,?,?,?,?,?)""",
-                          (barcode,)+values)
-                new_id=c.execute("SELECT last_insert_rowid()").fetchone()[0]
+                new_id=next_local_id(c,"products")
+                c.execute("""INSERT INTO products(id,barcode,name,category,buy_price,sell_price,stock,min_stock,fractional)
+                             VALUES(?,?,?,?,?,?,?,?,?)""",
+                          (new_id,barcode)+values)
             c.commit()
-            sync_queue(c, "PRODUCT_UPSERT", {"id": new_id, "barcode": barcode or "", "name": values[0], "category": values[1], "buy_price": values[2], "sell_price": values[3], "stock": values[4], "min_stock": values[5], "fractional": values[6], "active": 1})
+            sync_queue(c, "PRODUCT_UPSERT", {"id": new_id, "barcode": barcode or "", "name": values[0], "category": values[1], "buy_price": values[2], "sell_price": values[3], "stock": values[4], "min_stock": values[5], "fractional": values[6], "active": 1, "stock_set": True})
             c.commit(); audit("PRODUCT_CREATE", values[0]); flash("Producto agregado.","ok")
         except sqlite3.IntegrityError:
             c.rollback(); flash("El código de barras ya existe.","error")
@@ -506,9 +529,10 @@ def customers():
     c=db()
     if request.method=="POST":
         d=request.form
-        c.execute("INSERT INTO customers(name,phone,address) VALUES(?,?,?)",
-                  (d["name"].strip(),d.get("phone","").strip(),d.get("address","").strip()))
-        c.commit(); row=c.execute("SELECT * FROM customers WHERE id=last_insert_rowid()").fetchone(); sync_queue(c, "CUSTOMER_UPSERT", dict(row) if row else {}); c.commit(); c.close(); audit("CUSTOMER_CREATE", d["name"].strip()); flash("Cliente agregado.","ok")
+        new_cid=next_local_id(c,"customers")
+        c.execute("INSERT INTO customers(id,name,phone,address) VALUES(?,?,?,?)",
+                  (new_cid,d["name"].strip(),d.get("phone","").strip(),d.get("address","").strip()))
+        c.commit(); row=c.execute("SELECT * FROM customers WHERE id=?",(new_cid,)).fetchone(); sync_queue(c, "CUSTOMER_UPSERT", dict(row) if row else {}); c.commit(); c.close(); audit("CUSTOMER_CREATE", d["name"].strip()); flash("Cliente agregado.","ok")
         return redirect(url_for("customers"))
     rows=c.execute("SELECT * FROM customers WHERE active=1 ORDER BY name").fetchall()
     c.close()
@@ -641,11 +665,11 @@ def new_sale():
                 if not cust: raise ValueError("Cliente inválido.")
             if payment_type=="mixto" and abs((pay_cash+pay_transfer)-total) > 0.01:
                 raise ValueError(f"Los montos del pago mixto (${pay_cash:.2f} + ${pay_transfer:.2f}) no suman el total de la venta (${total:.2f}).")
-            cur=c.execute("""INSERT INTO sales(user_id,customer_id,cash_session_id,total,payment,created_at,status,payment_cash,payment_transfer)
-                             VALUES(?,?,?,?,?,?,?,?,?)""",
-                          (session["user_id"],cid,cash["id"] if (payment_type=="efectivo" or (payment_type=="mixto" and pay_cash>0)) and cash else None,
+            sid=next_local_id(c,"sales")
+            c.execute("""INSERT INTO sales(id,user_id,customer_id,cash_session_id,total,payment,created_at,status,payment_cash,payment_transfer)
+                             VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                          (sid,session["user_id"],cid,cash["id"] if (payment_type=="efectivo" or (payment_type=="mixto" and pay_cash>0)) and cash else None,
                            total,payment_type,now(),"valida",pay_cash,pay_transfer))
-            sid=cur.lastrowid
             for p,qty,unit_price,subtotal in validated:
                 c.execute("""INSERT INTO sale_items(sale_id,product_id,qty,unit_price,subtotal)
                              VALUES(?,?,?,?,?)""",(sid,p["id"],qty,unit_price,subtotal))
@@ -783,8 +807,9 @@ def suppliers():
     c=db()
     if request.method=="POST":
         d=request.form
-        c.execute("INSERT INTO suppliers(name,phone,notes) VALUES(?,?,?)",(d["name"].strip(),d.get("phone",""),d.get("notes","")))
-        c.commit(); row=c.execute("SELECT * FROM suppliers WHERE id=last_insert_rowid()").fetchone(); sync_queue(c, "SUPPLIER_UPSERT", dict(row) if row else {}); c.commit(); c.close(); audit("SUPPLIER_CREATE",d["name"].strip()); flash("Proveedor agregado.","ok")
+        new_sup=next_local_id(c,"suppliers")
+        c.execute("INSERT INTO suppliers(id,name,phone,notes) VALUES(?,?,?,?)",(new_sup,d["name"].strip(),d.get("phone",""),d.get("notes","")))
+        c.commit(); row=c.execute("SELECT * FROM suppliers WHERE id=?",(new_sup,)).fetchone(); sync_queue(c, "SUPPLIER_UPSERT", dict(row) if row else {}); c.commit(); c.close(); audit("SUPPLIER_CREATE",d["name"].strip()); flash("Proveedor agregado.","ok")
         return redirect(url_for("suppliers"))
     rows=c.execute("SELECT * FROM suppliers WHERE active=1 ORDER BY name").fetchall()
     c.close(); return render_template("suppliers.html", suppliers=rows)
@@ -807,9 +832,9 @@ def purchases():
                 qty=float(item["qty"]); cost=float(item["cost"])
                 if not p or qty<=0 or cost<0: raise ValueError("Producto, cantidad o costo inválido.")
                 sub=round(qty*cost,2); total+=sub; validated.append((p,qty,cost,sub))
-            cur=c.execute("INSERT INTO purchases(supplier_id,user_id,total,created_at) VALUES(?,?,?,?)",
-                          (sid,session["user_id"],total,now()))
-            pid=cur.lastrowid
+            pid=next_local_id(c,"purchases")
+            c.execute("INSERT INTO purchases(id,supplier_id,user_id,total,created_at) VALUES(?,?,?,?,?)",
+                          (pid,sid,session["user_id"],total,now()))
             for p,qty,cost,sub in validated:
                 c.execute("""INSERT INTO purchase_items(purchase_id,product_id,qty,unit_cost,subtotal)
                              VALUES(?,?,?,?,?)""",(pid,p["id"],qty,cost,sub))
@@ -889,11 +914,51 @@ def stock_adjustment():
             import uuid; op_id=uuid.uuid4().hex; created=now()
             c.execute("INSERT INTO stock_movements(op_id,product_id,qty,reason,note,user_id,device_id,created_at,stock_before,stock_after) VALUES(?,?,?,?,?,?,?,?,?,?)", (op_id,pid,delta,reason,note,session["user_id"],stock_device_id(),created,before,after))
             c.execute("UPDATE products SET stock=stock+? WHERE id=?", (delta,pid))
-            sync_queue(c,"STOCK_ADJUSTMENT",{"op_id":op_id,"product_id":pid,"qty":delta,"reason":reason,"note":note,"user_id":session["user_id"],"device_id":stock_device_id(),"created_at":created})
+            sync_queue(c,"STOCK_ADJUSTMENT",{"op_id":op_id,"product_id":pid,"barcode":p["barcode"],"qty":delta,"reason":reason,"note":note,"user_id":session["user_id"],"device_id":stock_device_id(),"created_at":created})
             c.commit(); audit("STOCK_ADJUSTMENT",f"{p['name']}: {delta:+g}; motivo={STOCK_REASONS[reason]}; stock {before:g} -> {after:g}")
             flash(f"Ajuste registrado. Stock: {before:g} → {after:g}.","ok"); return redirect(url_for("stock_history"))
         except Exception as e: c.rollback(); flash(str(e),"error")
     c.close(); return render_template("stock_adjustment.html", products=products, reasons=STOCK_REASONS)
+
+@app.route("/stock/conteo", methods=["GET","POST"])
+@login_required
+@perm_required("products")
+def stock_count():
+    """Control de stock: se carga lo que realmente se contó y el número queda FIJO (absoluto) en
+    todos los dispositivos, aunque cada uno tuviera un valor distinto por cambios que se perdieron."""
+    c=db()
+    if request.method=="POST":
+        import uuid
+        changed=same=0; errors=[]
+        for p in c.execute("SELECT * FROM products WHERE active=1 ORDER BY name").fetchall():
+            raw=(request.form.get(f"count_{p['id']}") or "").strip().replace(",",".")
+            if raw=="": continue
+            try: real=float(raw)
+            except ValueError: errors.append(f"{p['name']}: '{raw}' no es un número."); continue
+            if real<0: errors.append(f"{p['name']}: el stock no puede ser negativo."); continue
+            if not p["fractional"] and abs(real-round(real))>1e-9: errors.append(f"{p['name']} no admite cantidades decimales."); continue
+            before=float(p["stock"] or 0)
+            note="Control de stock (conteo físico)"
+            if abs(real-before)<0.0005:
+                # Acá ya coincide, pero el OTRO dispositivo puede tener un valor distinto: se envía igual
+                # el valor real (absoluto) para que también ahí quede fijo.
+                sync_queue(c,"STOCK_ADJUSTMENT",{"op_id":uuid.uuid4().hex,"product_id":p["id"],"barcode":p["barcode"],"qty":0,"set_to":real,
+                           "reason":"correccion","note":note,"user_id":session["user_id"],"device_id":stock_device_id(),"created_at":now()})
+                same+=1; continue
+            delta=real-before; op_id=uuid.uuid4().hex; created=now()
+            c.execute("INSERT INTO stock_movements(op_id,product_id,qty,reason,note,user_id,device_id,created_at,stock_before,stock_after) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                      (op_id,p["id"],delta,"correccion",note,session["user_id"],stock_device_id(),created,before,real))
+            c.execute("UPDATE products SET stock=? WHERE id=?",(real,p["id"]))
+            sync_queue(c,"STOCK_ADJUSTMENT",{"op_id":op_id,"product_id":p["id"],"barcode":p["barcode"],"qty":delta,"set_to":real,
+                       "reason":"correccion","note":note,"user_id":session["user_id"],"device_id":stock_device_id(),"created_at":created})
+            changed+=1
+        c.commit(); c.close()
+        if changed: audit("STOCK_COUNT",f"Control de stock: {changed} producto(s) corregido(s), {same} ya coincidían")
+        if errors: flash("No se guardaron estos productos: "+" · ".join(errors),"error")
+        flash(f"Control de stock guardado: {changed} producto(s) corregido(s), {same} ya coincidían con el sistema (igual se fijó su valor real en el otro dispositivo).","ok")
+        return redirect(url_for("stock_count"))
+    products=c.execute("SELECT * FROM products WHERE active=1 ORDER BY name").fetchall(); c.close()
+    return render_template("stock_count.html", products=products)
 
 @app.get("/stock/historial")
 @login_required
@@ -1259,6 +1324,9 @@ def settings():
 @admin_required
 def sync_page():
     if request.method=="POST":
+        if request.form.get("action")=="clear_conflicts":
+            c=db(); c.execute("DELETE FROM sync_conflicts"); c.commit(); c.close()
+            flash("Lista de conflictos limpiada.","ok"); return redirect(url_for("sync_page"))
         try:
             from sync_client import sync_async
             started,msg=sync_async()
@@ -1267,8 +1335,10 @@ def sync_page():
             flash("No se pudo sincronizar: "+str(e), "error")
         return redirect(url_for("sync_page"))
     pending,last=sync_status_data()
+    n_conflicts,conflicts=sync_conflicts_data()
     configured=bool(os.environ.get("MI_NEGOCIO_SYNC_URL") and os.environ.get("MI_NEGOCIO_SYNC_KEY"))
-    return render_template("sync.html", pending=pending, last=last, configured=configured, url=os.environ.get("MI_NEGOCIO_SYNC_URL", ""))
+    return render_template("sync.html", pending=pending, last=last, configured=configured, url=os.environ.get("MI_NEGOCIO_SYNC_URL", ""),
+                           n_conflicts=n_conflicts, conflicts=conflicts)
 
 
 init_db()
