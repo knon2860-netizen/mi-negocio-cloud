@@ -177,18 +177,6 @@ def init_db():
                   ("admin", generate_password_hash("admin123"), "admin", 1, now()))
         c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
                   ("empleado", generate_password_hash("empleado123"), "employee", 1, now()))
-
-    # Recuperacion de acceso inicial en la nube: solo se ejecuta cuando
-    # Render tiene MI_NEGOCIO_RESET_ADMIN=1. No modifica contrasenas en
-    # condiciones normales y permite conservar la funcion de cambio de clave.
-    if os.environ.get("MI_NEGOCIO_RESET_ADMIN", "").strip() == "1":
-        admin_row = c.execute("SELECT id FROM users WHERE username=?", ("admin",)).fetchone()
-        if admin_row:
-            c.execute("UPDATE users SET password=?, role=?, active=1 WHERE username=?",
-                      (generate_password_hash("admin123"), "admin", "admin"))
-        else:
-            c.execute("INSERT INTO users(username,password,role,active,created_at) VALUES(?,?,?,?,?)",
-                      ("admin", generate_password_hash("admin123"), "admin", 1, now()))
     apply_id_namespace(c)
     c.commit(); c.close()
 
@@ -198,7 +186,7 @@ def init_db():
 # que ver con "venta #5" en la nube); al sincronizar, el que recibe cree que ya la tiene y la
 # descarta, perdiendo esa venta y el descuento de stock que traía. Se corre una sola vez.
 ID_NAMESPACE_TABLES=("products","customers","suppliers","sales","purchases")
-ID_NAMESPACE_OFFSET=20_000_000   # Nube. La PC usa 10.000.000 (ver app.py de la PC).
+ID_NAMESPACE_OFFSET=10_000_000   # PC. La nube usa 20.000.000 (ver cloud_launcher/app.py de la nube).
 
 def next_local_id(c, table):
     """Número para un registro nuevo creado en ESTE dispositivo. Siempre cae dentro de su rango
@@ -212,31 +200,18 @@ def next_local_id(c, table):
 
 def apply_id_namespace(c):
     if get_setting(c,"id_namespace_v1","")=="1": return
-    if os.environ.get("DATABASE_URL"):
-        for t in ID_NAMESPACE_TABLES:
-            try:
-                c.execute("SAVEPOINT idns_sp")
-                c.execute(f"SELECT setval(pg_get_serial_sequence('{t}','id'), GREATEST({ID_NAMESPACE_OFFSET},(SELECT COALESCE(MAX(id),0) FROM {t})), true)")
-                c.execute("RELEASE SAVEPOINT idns_sp")
-            except Exception:
-                try:
-                    c.execute("ROLLBACK TO SAVEPOINT idns_sp"); c.execute("RELEASE SAVEPOINT idns_sp")
-                except Exception:
-                    pass
-    else:
-        # Solo para pruebas locales en sqlite sin Postgres.
-        for t in ID_NAMESPACE_TABLES:
-            row=c.execute("SELECT seq FROM sqlite_sequence WHERE name=?",(t,)).fetchone()
-            if row:
-                if row["seq"]<ID_NAMESPACE_OFFSET:
-                    c.execute("UPDATE sqlite_sequence SET seq=? WHERE name=?",(ID_NAMESPACE_OFFSET,t))
-            else:
-                c.execute("INSERT INTO sqlite_sequence(name,seq) VALUES(?,?)",(t,ID_NAMESPACE_OFFSET))
+    for t in ID_NAMESPACE_TABLES:
+        row=c.execute("SELECT seq FROM sqlite_sequence WHERE name=?",(t,)).fetchone()
+        if row:
+            if row["seq"]<ID_NAMESPACE_OFFSET:
+                c.execute("UPDATE sqlite_sequence SET seq=? WHERE name=?",(ID_NAMESPACE_OFFSET,t))
+        else:
+            c.execute("INSERT INTO sqlite_sequence(name,seq) VALUES(?,?)",(t,ID_NAMESPACE_OFFSET))
     set_setting(c,"id_namespace_v1","1")
 
 def sync_queue(c, op_type, payload):
     import uuid
-    device_id=(os.environ.get("MI_NEGOCIO_DEVICE_ID") or os.environ.get("MI_NEGOCIO_CLOUD_DEVICE_ID") or "ANDROID-WEB")
+    device_id=os.environ.get("MI_NEGOCIO_DEVICE_ID", "WINDOWS-001")
     op_id=uuid.uuid4().hex
     c.execute("INSERT INTO sync_outbox(op_id,device_id,type,payload,created_at,synced) VALUES(?,?,?,?,?,?)",
               (op_id, device_id, op_type, json.dumps(payload, ensure_ascii=False), now(), 0))
@@ -258,10 +233,7 @@ def sync_status_data():
     try:
         c=db(); n=c.execute("SELECT COUNT(*) FROM sync_outbox WHERE synced=0").fetchone()[0]
         last=c.execute("SELECT value FROM sync_state WHERE key='last_sync'").fetchone()
-        res=c.execute("SELECT value FROM sync_state WHERE key='last_result'").fetchone()
-        c.close(); txt=(last[0] if last else "Nunca")
-        if res: txt += "  |  Último intento: " + res[0]
-        return n, txt
+        c.close(); return n, (last[0] if last else "Nunca")
     except Exception:
         return 0, "Nunca"
 
@@ -570,7 +542,7 @@ def adjust_customer_balance(cid):
     c=db(); cust=c.execute("SELECT * FROM customers WHERE id=? AND active=1",(cid,)).fetchone()
     if not cust: c.close(); flash("Cliente inexistente.","error"); return redirect(url_for("customers"))
     new_balance=max(0,cust["balance"]+delta)
-    applied=new_balance-cust["balance"]
+    applied=new_balance-cust["balance"]   # por si el ajuste hacia abajo se recorta en 0
     c.execute("UPDATE customers SET balance=? WHERE id=?",(new_balance,cid))
     c.execute("""INSERT INTO account_movements(customer_id,type,amount,note,created_at)
                  VALUES(?,?,?,?,?)""",(cid,"adjustment",applied,f"Ajuste de saldo: {reason}",now()))
@@ -610,7 +582,7 @@ def sales():
     c=db()
     rows=c.execute("""SELECT s.*,u.username,COALESCE(c.name,'Consumidor final') customer
                      FROM sales s JOIN users u ON u.id=s.user_id
-                     LEFT JOIN customers c ON c.id=s.customer_id ORDER BY s.id DESC LIMIT 500""").fetchall()
+                     LEFT JOIN customers c ON c.id=s.customer_id ORDER BY s.created_at DESC, s.id DESC LIMIT 500""").fetchall()
     c.close(); return render_template("sales.html", sales=rows)
 
 @app.route("/new-sale", methods=["GET","POST"])
@@ -1241,12 +1213,8 @@ def reset_all_data():
         flash("Tenés que tildar la casilla de confirmación para borrar todo.", "error")
         return redirect(url_for("settings"))
     c=db()
-    print("[reset] conexión:", type(c).__name__, "| DATABASE_URL activo:", bool(os.environ.get("DATABASE_URL")), "| DB:", DB, flush=True)
     for t in RESET_TABLES:
-        antes=c.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
         c.execute(f"DELETE FROM {t}")
-        despues=c.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
-        print(f"[reset] {t}: tenía {antes} filas, quedaron {despues}", flush=True)
     for t in ("sync_outbox","sync_state","sync_applied","applied_operations","operations"):
         if t in ("sync_state","applied_operations","operations") and not os.environ.get("DATABASE_URL"):
             # En la PC (base local, no la nube compartida) NO se toca el cursor de
@@ -1254,35 +1222,19 @@ def reset_all_data():
             # descargar TODO el historial viejo del servidor central y "resucitaría" datos
             # que se acaban de borrar. Solo la nube (que comparte la base con el servidor
             # central) puede reiniciar esto de forma segura.
-            print(f"[reset] {t}: se deja sin tocar (es de la PC, no de la nube)", flush=True)
             continue
-        # SAVEPOINT: en PostgreSQL, si una tabla no existe acá (algunas son solo de la PC),
-        # ese error deja toda la transacción inválida y el commit final terminaría
-        # deshaciendo TODO lo borrado antes. Aislamos cada tabla para que eso no pase.
         try:
             c.execute("SAVEPOINT reset_sp")
-            antes=c.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
             c.execute(f"DELETE FROM {t}")
             c.execute("RELEASE SAVEPOINT reset_sp")
-            print(f"[reset] {t}: tenía {antes} filas (sync)", flush=True)
-        except Exception as e:
+        except Exception:
             try:
                 c.execute("ROLLBACK TO SAVEPOINT reset_sp"); c.execute("RELEASE SAVEPOINT reset_sp")
             except Exception:
                 pass
-            print(f"[reset] {t}: no existe o falló ({e!r})", flush=True)
-    try:
-        c.execute("SAVEPOINT reset_sp2")
-        c.execute("DELETE FROM sqlite_sequence")
-        c.execute("RELEASE SAVEPOINT reset_sp2")
-    except Exception:
-        try:
-            c.execute("ROLLBACK TO SAVEPOINT reset_sp2"); c.execute("RELEASE SAVEPOINT reset_sp2")
-        except Exception:
-            pass
+    try: c.execute("DELETE FROM sqlite_sequence")
+    except Exception: pass
     c.commit(); c.close()
-    chequeo=db(); n_chequeo=chequeo.execute("SELECT COUNT(*) n FROM products").fetchone()["n"]; chequeo.close()
-    print(f"[reset] verificación con conexión NUEVA: products tiene {n_chequeo} filas", flush=True)
     init_db()   # recrea admin/empleado y ajustes por defecto
     try:
         from cloud_launcher import fix_sequences   # solo existe en la nube (Postgres)
@@ -1328,9 +1280,9 @@ def sync_page():
             c=db(); c.execute("DELETE FROM sync_conflicts"); c.commit(); c.close()
             flash("Lista de conflictos limpiada.","ok"); return redirect(url_for("sync_page"))
         try:
-            from sync_client import sync_async
-            started,msg=sync_async()
-            flash(msg, "ok" if started else "error")
+            from sync_client import sync_once
+            result=sync_once()
+            flash(result.get("message","Sincronización terminada."), "ok" if result.get("ok") else "error")
         except Exception as e:
             flash("No se pudo sincronizar: "+str(e), "error")
         return redirect(url_for("sync_page"))
