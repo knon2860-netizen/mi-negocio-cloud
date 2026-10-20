@@ -5,4 +5,13 @@
 <p><strong>Última sincronización:</strong> {{last}}</p>
 {% if configured %}<p class="muted">La PC sigue funcionando sin Internet. Cuando vuelve la conexión, la sincronización puede ejecutarse automáticamente. También podés forzarla con el botón.</p>{% else %}<p class="muted">Para activar la sincronización por Internet hay que configurar MI_NEGOCIO_SYNC_URL y MI_NEGOCIO_SYNC_KEY en Windows. La base <code>mi_negocio.db</code> no se reemplaza.</p>{% endif %}
 <form method="post"><button {% if not configured %}disabled{% endif %}>🔄 Sincronizar ahora</button></form>
-<hr><p>Red local del celular: ya no se usa <code>192.168.x.x:5050</code> para la sincronización remota.</p></div>{% endblock %}
+<hr><p>Red local del celular: ya no se usa <code>192.168.x.x:5050</code> para la sincronización remota.</p></div>
+<div class="card">
+{% if n_conflicts %}
+<h2>⚠️ Cambios que no se pudieron aplicar ({{n_conflicts}})</h2>
+<p class="muted">Son cambios que llegaron del otro dispositivo y no se aplicaron por completo (por ejemplo, una venta con número repetido o un producto que no existe acá). Revisá el stock de esos productos con el <a href="/stock/conteo"><b>Control de stock</b></a>.</p>
+<div class="tablewrap"><table><tr><th>Fecha</th><th>Tipo</th><th>Detalle</th></tr>
+{% for k in conflicts %}<tr><td>{{k.created_at}}</td><td>{{ {'id_repetido':'Número repetido','producto_no_encontrado':'Producto no encontrado','error':'Error'}.get(k.kind,k.kind) }}</td><td>{{k.detail}}</td></tr>{% endfor %}</table></div>
+<form method="post"><input type="hidden" name="action" value="clear_conflicts"><button class="small">Ya los revisé, limpiar la lista</button></form>
+{% else %}<p>✔ No hay cambios de sincronización pendientes de revisar.</p>{% endif %}
+</div>{% endblock %}

@@ -1,0 +1,48 @@
+{% extends "base.html" %}{% block content %}
+<div class="pagehead"><div><h1>📦 Control de stock (conteo físico)</h1>
+<p class="muted">Contá lo que realmente hay y escribilo en la columna "Stock real". Solo se corrigen los productos donde escribas un número; el resto no se toca. Al guardar, ese número queda <b>igual en la PC y en el celular</b>, aunque antes tuvieran valores distintos.</p></div>
+<a class="btn small" href="/stock/historial">📋 Historial de stock</a></div>
+<form method="post" id="countForm">
+<div class="card">
+<div class="toolbar"><input id="q" placeholder="Buscar producto o código..." oninput="filterRows()" style="min-width:260px">
+<label style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="onlyDiff" onchange="filterRows()"> Mostrar solo los que tienen diferencia</label>
+<span id="summary" class="muted"></span>
+<button type="submit">💾 Guardar conteo</button></div>
+<div class="tablewrap"><table id="ctable"><tr><th>Producto</th><th>Código</th><th>Categoría</th><th>Stock en el sistema</th><th>Stock real (contado)</th><th>Diferencia</th></tr>
+{% for p in products %}<tr data-search="{{ (p.name ~ ' ' ~ (p.barcode or ''))|lower }}" data-sys="{{p.stock}}"><td><b>{{p.name}}</b></td><td>{{p.barcode or '-'}}</td><td>{{p.category or '-'}}</td><td>{{ ('%.3f'|format(p.stock)).rstrip('0').rstrip('.') }}{% if p.fractional %} kg{% endif %}</td>
+<td><input name="count_{{p.id}}" inputmode="decimal" autocomplete="off" placeholder="—" oninput="diffRow(this)" style="width:110px"></td><td class="diff">-</td></tr>{% endfor %}
+{% if not products %}<tr><td colspan="6" class="muted">No hay productos cargados.</td></tr>{% endif %}
+</table></div>
+<div class="toolbar"><button type="submit">💾 Guardar conteo</button></div>
+</div></form>
+<script>
+function num(v){v=(v||'').toString().trim().replace(',','.');if(v==='')return null;let n=parseFloat(v);return isNaN(n)?null:n}
+function fmt(n){return (Math.round(n*1000)/1000).toString()}
+function diffRow(inp){
+  const tr=inp.closest('tr'), cell=tr.querySelector('.diff'), sys=parseFloat(tr.dataset.sys), real=num(inp.value);
+  if(real===null){cell.textContent='-';cell.style.color='';tr.dataset.diff='';}
+  else{const d=real-sys; if(Math.abs(d)<0.0005){cell.textContent='✔ coincide';cell.style.color='#15803d';tr.dataset.diff='';}
+       else{cell.textContent=(d>0?'+':'')+fmt(d);cell.style.color='#b91c1c';tr.dataset.diff='1';}}
+  updateSummary();
+}
+function updateSummary(){
+  let n=0;document.querySelectorAll('#ctable tr[data-sys]').forEach(r=>{if(r.dataset.diff==='1')n++});
+  document.getElementById('summary').textContent = n? ('Se van a corregir '+n+' producto(s).') : '';
+}
+function filterRows(){
+  const q=document.getElementById('q').value.toLowerCase().trim(), only=document.getElementById('onlyDiff').checked;
+  document.querySelectorAll('#ctable tr[data-sys]').forEach(r=>{
+    const ok=(!q||r.dataset.search.includes(q)) && (!only||r.dataset.diff==='1');
+    r.style.display=ok?'':'none';
+  });
+}
+// Enter en un campo pasa al siguiente en vez de enviar el formulario
+document.getElementById('countForm').addEventListener('keydown',e=>{
+  if(e.key==='Enter' && e.target.tagName==='INPUT' && e.target.name && e.target.name.startsWith('count_')){
+    e.preventDefault();
+    const all=Array.from(document.querySelectorAll('#ctable tr[data-sys]')).filter(r=>r.style.display!=='none').map(r=>r.querySelector('input'));
+    const i=all.indexOf(e.target); if(i>=0 && all[i+1]) all[i+1].focus();
+  }
+});
+</script>
+{% endblock %}
